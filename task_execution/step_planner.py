@@ -2,7 +2,13 @@ from typing import List, Dict, Optional
 from models.api import Model
 from vision.vision_analysis import ScreenAnalysis, InterfaceType
 from vision.vision_base import UIElement
-from task_execution.data_structures import DetailedStep, TaskContext, StepPlan
+from task_execution.data_structures import (
+    DetailedStep, 
+    TaskContext, 
+    StepPlan,
+    PlanStepHistory,
+    StepAttempt
+)
 from util.logger import plan_logger as logger
 import json
 
@@ -16,6 +22,7 @@ class StepPlanner:
             1. Generate precise interaction instructions for the current step
             2. Consider system constraints and capabilities
             3. Provide clear success criteria for the step
+            4. Learn from previous attempts and avoid repeating failed approaches
             """
 
     def determine_next_action(self, 
@@ -28,30 +35,42 @@ class StepPlanner:
                 logger.error("Missing required context or vision_analysis")
                 return None
                 
-            # Get current step from plan
-            if context.current_step >= len(context.plan.steps):
-                logger.info("No more steps in plan")
+            # Get current step from current plan
+            if context.current_plan is None or context.current_step >= len(context.current_plan.steps):
+                logger.info("No more steps in current plan")
                 return None
                 
-            current_plan_step = context.plan.steps[context.current_step]
+            current_plan_step = context.current_plan.steps[context.current_step]
             logger.info(f"Processing plan step: {current_plan_step.description}")
             
-            # Analyze screen
-            vision_analysis.analyze_text_screen()
+            # Get step history
+            step_histories = context.get_current_step_history(include_mapped=True)
+            
+            # Build screen context
             screen_context = self._get_screen_context(vision_analysis)
             
-            # Generate step data
-            step_data = self._generate_step(
-                current_plan_step,
-                context,
-                vision_analysis,
-                screen_context
+            # Generate step
+            step_prompt = self._create_step_prompt(
+                current_plan_step=current_plan_step,
+                screen_context=screen_context,
+                vision_analysis=vision_analysis,
+                step_histories=step_histories
             )
             
-            if not step_data:
-                logger.error("Failed to generate step data")
+            logger.debug(f"Generating step with prompt: {step_prompt}")
+            response = self.model.generate_content(step_prompt, vision_analysis.image, self.system_prompt)
+            
+            if not response:
+                logger.error("Model returned empty response")
                 return None
                 
+            step_data = Model.parse_json(response)
+            if not step_data:
+                logger.error("Failed to parse model response as JSON")
+                return None
+                
+            self._validate_step_data(step_data)
+            
             # Create detailed step
             detailed_step = self._create_detailed_step(step_data, vision_analysis)
             if not detailed_step:
@@ -68,14 +87,131 @@ class StepPlanner:
         except Exception as e:
             logger.error(f"Error in determine_next_action: {str(e)}")
             return None
+        
+    def _create_step_prompt(self,
+                          current_plan_step,
+                          screen_context: str,
+                          vision_analysis: ScreenAnalysis,
+                          step_histories: List[PlanStepHistory]) -> str:
+        """Create the prompt for step generation"""
+        history_context = self._format_step_history(step_histories) if step_histories else "No previous attempts"
 
+        return f"""
+        Generate a precise UI interaction step to accomplish this goal.
+
+        Current Plan Step: {current_plan_step.description}
+        Required Elements: {', '.join(current_plan_step.precondition.key_elements)}
+        Expected Outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
+        
+        Interface Type: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
+        
+        Current Screen Elements:
+        {screen_context}
+        
+        Previous Attempts History:
+        {history_context}
+
+        Requirements:
+        1. Generate EXACTLY ONE specific UI interaction
+        2. Use only currently visible elements
+        3. Consider previous failed attempts
+        4. Choose a different approach if previous attempts failed
+        5. Ensure the action moves towards the expected outcome
+
+        Return as JSON:
+        {{
+            "description": "Detailed description of what needs to be done and why",
+            "action": "exactly one of: click, type, press_key, select",
+            "target": "specific element to interact with based on visible elements",
+            "context": {{
+                "input_text": "exact text to type (for text inputs)",
+                "input_format": "any special format requirements",
+                "append_enter": boolean,
+                "max_length": number,
+                "special_characters": [],
+                "additional_notes": "any other relevant information"
+            }}
+        }}
+        """
+
+    def _format_step_history(self, histories: List[PlanStepHistory]) -> str:
+        """Format step history for the prompt"""
+        if not histories:
+            return "No previous attempts"
+            
+        result = []
+        for history in histories:
+            failed_attempts = history.all_failed_attempts
+            result.append(f"Total attempts: {len(history.attempts)}")
+            result.append(f"Failed attempts: {len(failed_attempts)}")
+            
+            if failed_attempts:
+                result.append("\nFailed approaches tried:")
+                for attempt in failed_attempts:
+                    result.append(f"""
+                    - Action: {', '.join(str(step) for step in attempt.detailed_plan.steps)}
+                    - Reason for failure: {attempt.evaluation_reasoning}
+                    """)
+            
+            if history.latest_attempt and history.latest_attempt.step_completed:
+                result.append("\nLast successful attempt:")
+                result.append(f"""
+                - Action: {', '.join(str(step) for step in history.latest_attempt.detailed_plan.steps)}
+                - Outcome: {history.latest_attempt.evaluation_reasoning}
+                """)
+                
+        return "\n".join(result)
+    
+    def _create_detailed_step(self, 
+                            step_data: dict,
+                            vision_analysis: ScreenAnalysis) -> Optional[DetailedStep]:
+        """Convert step data into DetailedStep object"""
+        try:
+            context_data = self._process_step_context(step_data)
+            coordinates = self._get_step_coordinates(step_data, vision_analysis)
+            
+            return DetailedStep(
+                description=step_data.get('description') or "",
+                action=step_data.get('action') or "",
+                target=step_data.get('target'),
+                coordinates=tuple(coordinates) if coordinates else None,
+                context=context_data,
+                expected_result=step_data.get('expected_result')
+            )
+        except Exception as e:
+            logger.error(f"Error creating detailed step: {str(e)}")
+            return None
+        
     def _generate_step(self,
                       plan_step,
                       context: TaskContext,
                       vision_analysis: ScreenAnalysis,
-                      screen_context: str) -> Optional[dict]:
-        """Generate detailed step data based on plan step"""
+                      screen_context: str,
+                      step_histories: List[PlanStepHistory]) -> Optional[dict]:
+        """Generate detailed step data based on plan step and execution history"""
         try:
+            # Build history context
+            history_context = ""
+            if step_histories:
+                history_context = "Previous attempts for this step:\n"
+                for history in step_histories:
+                    history_context += f"""
+                    Step: {history.plan_step_description}
+                    Total attempts: {len(history.attempts)}
+                    Failed attempts: {len(history.all_failed_attempts)}
+                    
+                    Previous attempts:
+                    """
+                    for i, attempt in enumerate(history.attempts, 1):
+                        history_context += f"""
+                        Attempt {i}:
+                        - Plan: {attempt.detailed_plan.plan_description}
+                        - Actions: {', '.join(str(step) for step in attempt.detailed_plan.steps)}
+                        - Success: {attempt.execution_success}
+                        - Completed: {attempt.step_completed}
+                        - Reasoning: {attempt.evaluation_reasoning}
+                        """
+
             step_prompt = f"""
             Generate a precise UI interaction step to accomplish this goal.
 
@@ -83,15 +219,16 @@ class StepPlanner:
             Required Elements: {', '.join(plan_step.precondition.key_elements)}
             Expected Outcome: {plan_step.expected_outcome.description if plan_step.expected_outcome else 'Unknown'}
             
-            Interface Type: {vision_analysis.environment.interface_type.name}
+            Interface Type: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
             Current Screen Elements:
             {screen_context}
             
-            Recent Observations:
-            {self._format_observations(context.observations)}
+            {history_context}
 
-            Previous Actions:
-            {self._format_actions(context.attempted_actions)}
+            Consider:
+            1. Previously failed attempts and why they failed
+            2. What approaches haven't been tried yet
+            3. Whether a different strategy is needed
 
             You must return EXACTLY ONE specific UI interaction as JSON:
             {{
@@ -128,25 +265,6 @@ class StepPlanner:
             logger.error(f"Error in _generate_step: {str(e)}")
             return None
 
-    def _create_detailed_step(self, 
-                            step_data: dict,
-                            vision_analysis: ScreenAnalysis) -> Optional[DetailedStep]:
-        """Convert step data into DetailedStep object"""
-        try:
-            context_data = self._process_step_context(step_data)
-            coordinates = self._get_step_coordinates(step_data, vision_analysis)
-            
-            return DetailedStep(
-                description=step_data.get('description'),
-                action=step_data.get('action'),
-                target=step_data.get('target'),
-                coordinates=coordinates,
-                context=context_data,
-                expected_result=step_data.get('expected_result')
-            )
-        except Exception as e:
-            logger.error(f"Error creating detailed step: {str(e)}")
-            return None
 
     def _validate_step_data(self, step_data: dict) -> bool:
         """Validate step data has required fields"""
@@ -167,11 +285,11 @@ class StepPlanner:
 
     def _get_screen_context(self, vision_analysis: ScreenAnalysis) -> str:
         """Generate context description based on interface type"""
-        if vision_analysis.environment.interface_type in [InterfaceType.TERMINAL, InterfaceType.TEXT_UI]:
+        if vision_analysis.environment and vision_analysis.environment.interface_type in [InterfaceType.TERMINAL, InterfaceType.TEXT_UI]:
             return f"""
-            Summary: {vision_analysis.text_screen_info.summary}
-            Screen Description: {vision_analysis.text_screen_info.screen_description}
-            Available Actions: {self._format_text_interactions(vision_analysis.text_screen_info.visible_interactions)}
+            Summary: {vision_analysis.text_screen_info.summary if vision_analysis.text_screen_info else 'No summary available'}
+            Screen Description: {vision_analysis.text_screen_info.screen_description if vision_analysis.text_screen_info else 'No screen description available'}
+            Available Actions: {self._format_text_interactions(vision_analysis.text_screen_info.visible_interactions) if vision_analysis.text_screen_info else 'No available actions'}
             """
         return self._create_ui_context(vision_analysis.elements)
 
@@ -207,13 +325,16 @@ class StepPlanner:
             print(f"Failed to process step context: {str(e)}")
             return {}
 
-    def _get_step_coordinates(self, step_data: dict, vision_analysis: ScreenAnalysis) -> Optional[dict]:
+    def _get_step_coordinates(self, step_data: dict, vision_analysis: ScreenAnalysis) -> Optional[tuple]:
         """Get coordinates for a step's target element if needed"""
         target = step_data.get('target')
-        if target and vision_analysis.capabilities.has_mouse:
+        if target and vision_analysis.capabilities and vision_analysis.capabilities.has_mouse:
             target_elem = self._find_ui_element(target, vision_analysis.elements)
             if target_elem:
-                return vision_analysis.get_coordinates(target_elem)
+                coordinates = vision_analysis.get_coordinates(target_elem)
+                if isinstance(coordinates, dict):
+                    return tuple(coordinates.values())
+                return coordinates
         return None
 
     def _create_ui_context(self, ui_elements: List[UIElement]) -> str:
@@ -249,7 +370,7 @@ class StepPlanner:
                 return element
         return None
 
-    def _generate_complexity_prompt(self, context: 'TaskContext', screen_context: str, interface_type: InterfaceType) -> str:
+    def _generate_complexity_prompt(self, context: TaskContext, screen_context: str, interface_type: InterfaceType) -> str:
         """Generate the prompt for analyzing task complexity"""
         return f"""
         Analyze this task and determine if it requires multiple steps.
@@ -273,7 +394,7 @@ class StepPlanner:
         - Only consider actions possible on the CURRENT screen
         - Any step must be possible with the currently visible/available UI elements
         
-        Goal: {context.goal.description}
+        Goal: {context.user_task}  # Updated from context.goal.description
         Current Phase: {context.current_phase}
         Interface Type: {interface_type.name}
         
@@ -282,9 +403,6 @@ class StepPlanner:
         
         Recent Observations:
         {self._format_observations(context.observations)}
-        
-        Previous Actions:
-        {self._format_actions(context.attempted_actions)}
         
         Return as JSON:
         {{
@@ -298,19 +416,18 @@ class StepPlanner:
         }}
         """
 
-
     def _generate_steps_prompt(self, 
-                         context: 'TaskContext',
-                         screen_context: str,
-                         interface_type: InterfaceType,
-                         require_single_step: bool,
-                         plan_description: str,      # Added parameter
-                         expected_outcome: str) -> str:    # Added parameter
+                        context: TaskContext,
+                        screen_context: str,
+                        interface_type: InterfaceType,
+                        require_single_step: bool,
+                        plan_description: str,
+                        expected_outcome: str) -> str:
         """Generate the prompt for step generation"""
         return f"""
         {f'Generate a SINGLE atomic step.' if require_single_step else 'Break down the required action into individual steps.'}
         
-        Goal: {context.goal.description}
+        Goal: {context.user_task}  # Updated from context.goal.description
         Current Phase: {context.current_phase}
         Interface Type: {interface_type.name}
         
@@ -319,12 +436,6 @@ class StepPlanner:
         
         Current Screen State:
         {screen_context}
-        
-        Recent Observations:
-        {self._format_observations(context.observations)}
-        
-        Previous Actions:
-        {self._format_actions(context.attempted_actions)}
         
         Definition of a SINGLE atomic step:
         - ONE mouse click on a specific element
@@ -355,7 +466,6 @@ class StepPlanner:
         }}
         """
 
-    
     def _format_observations(self, observations: List[str]) -> str:
         """Format recent observations for prompt"""
         if not observations:

@@ -4,7 +4,7 @@ import json
 import time
 from models.api import Model
 from protocol.vnc_controller import VNCController
-from task_execution.data_structures import StepInstruction, DetailedStep
+from task_execution.data_structures import StepPlan
 from util.logger import event_logger
 
 
@@ -48,9 +48,10 @@ class EventManager:
             Consider proper timing, keyboard modifiers, and mouse positioning.
             """
 
-    def execute_instructions(self, instructions: List[StepInstruction]) -> bool:
+    def execute_instructions(self, plan: StepPlan) -> bool:
         """Execute a sequence of instructions"""
         
+        instructions = plan.steps
         for instruction in instructions:
             retry_count = 0
             success = False
@@ -113,8 +114,9 @@ class EventManager:
             elif event.type == "keyup":
                 self.vnc.key_up(event.key)
             elif event.type == "delay":
-                time_to_sleep = min(event.duration/1000, 60)
-                time.sleep(time_to_sleep)
+                if event.duration and event.duration > 0:
+                    time_to_sleep = min(event.duration/1000, 60)
+                    time.sleep(time_to_sleep)
             return True
             
         except Exception as e:

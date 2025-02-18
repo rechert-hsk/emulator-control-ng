@@ -1,6 +1,9 @@
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import json
+import time
+import uuid
+
 
 @dataclass 
 class PlanCondition:
@@ -112,47 +115,207 @@ class DetailedStep(StepInstruction):
                 f"context={self.context}, expected_result={self.expected_result})")
 
 @dataclass
-class TaskContext:
-    """Maintains the context for task execution"""
-    user_task: str
-    plan: ExecutionPlan
-    current_step: int
-    current_phase: str
-    observations: List[str]  # Recent relevant observations
-    attempted_actions: List[str]  # History of actions tried
-
-    def to_json(self, file_path: str):
-        """Serialize TaskContext to a JSON file"""
-        with open(file_path, 'w') as file:
-            json.dump({
-                'user_task': self.user_task,
-                'plan': self.plan.to_dict(),
-                'current_step': self.current_step,
-                'current_phase': self.current_phase,
-                'observations': self.observations,
-                'attempted_actions': self.attempted_actions
-            }, file, indent=4)
-
-    @staticmethod
-    def from_json(file_path: str) -> 'TaskContext':
-        """Deserialize TaskContext from a JSON file"""
-        with open(file_path, 'r') as file:
-            data = json.load(file)
-            plan_data = data['plan']
-            plan = ExecutionPlan.from_dict(plan_data)
-            return TaskContext(
-                user_task=data['user_task'],
-                plan=plan,
-                current_step=data['current_step'],
-                current_phase=data['current_phase'],
-                observations=data['observations'],
-                attempted_actions=data['attempted_actions']
-            )
-
-@dataclass
 class StepPlan:
     """Contains the complete plan including steps and expected outcome"""
     steps: List[DetailedStep]
     plan_description: str 
     expected_outcome: str
 
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+import json
+import time
+
+@dataclass
+class StepAttempt:
+    """Records an attempt to execute a high-level plan step"""
+    timestamp: float
+    detailed_plan: StepPlan  # The detailed steps that were attempted
+    execution_success: bool  # Whether the detailed steps executed without errors
+    step_completed: bool  # Whether the high-level plan step was achieved
+    evaluation_reasoning: str  # Why the attempt succeeded/failed
+    screen_state: Dict  # UI state at time of evaluation
+
+    @staticmethod
+    def create_new(
+        detailed_plan: StepPlan,
+        execution_success: bool,
+        step_completed: bool,
+        evaluation_reasoning: str,
+        screen_state: Dict
+    ) -> 'StepAttempt':
+        return StepAttempt(
+            timestamp=time.time(),
+            detailed_plan=detailed_plan,
+            execution_success=execution_success,
+            step_completed=step_completed,
+            evaluation_reasoning=evaluation_reasoning,
+            screen_state=screen_state
+        )
+
+@dataclass
+class PlanStepHistory:
+    """Tracks all attempts for a specific step in the plan"""
+    plan_step_index: int
+    plan_step_description: str
+    attempts: List[StepAttempt]
+
+    def add_attempt(self, attempt: StepAttempt):
+        self.attempts.append(attempt)
+
+    @property
+    def latest_attempt(self) -> Optional[StepAttempt]:
+        return self.attempts[-1] if self.attempts else None
+
+    @property
+    def all_failed_attempts(self) -> List[StepAttempt]:
+        return [a for a in self.attempts if not a.step_completed]
+
+    def to_dict(self) -> Dict:
+        return {
+            'plan_step_index': self.plan_step_index,
+            'plan_step_description': self.plan_step_description,
+            'attempts': [
+                {
+                    'timestamp': attempt.timestamp,
+                    'detailed_plan': {
+                        'steps': [vars(step) for step in attempt.detailed_plan.steps],
+                        'plan_description': attempt.detailed_plan.plan_description,
+                        'expected_outcome': attempt.detailed_plan.expected_outcome
+                    },
+                    'execution_success': attempt.execution_success,
+                    'step_completed': attempt.step_completed,
+                    'evaluation_reasoning': attempt.evaluation_reasoning,
+                    'screen_state': attempt.screen_state
+                }
+                for attempt in self.attempts
+            ]
+        }
+
+@dataclass
+class PlanVersion:
+    """Represents a version of the execution plan"""
+    plan: ExecutionPlan
+    created_at: float
+    reason: str
+    step_mapping: Optional[Dict[int, int]] = None  # Maps steps from previous version to this one
+
+@dataclass
+class TaskContext:
+    """Maintains the context for task execution"""
+    user_task: str
+    plan_versions: List[PlanVersion]  # History of all plans
+    current_step: int
+    current_phase: str
+    observations: List[str]
+    step_histories: Dict[str, PlanStepHistory]  # Maps "plan_version:step_index" to history
+    
+    @property
+    def current_plan(self) -> Optional[ExecutionPlan]:
+        """Get the current active plan"""
+        return self.plan_versions[-1].plan if self.plan_versions else None
+
+    def add_new_plan(self, new_plan: ExecutionPlan, reason: str, step_mapping: Optional[Dict[int, int]] = None):
+        """
+        Add a new plan version with optional mapping of steps from previous plan
+        
+        Args:
+            new_plan: The new execution plan
+            reason: Why replanning was needed
+            step_mapping: Dictionary mapping steps from old plan to new plan
+                        e.g., {0: 1, 2: 3} means old step 0 corresponds to new step 1
+        """
+        version = PlanVersion(
+            plan=new_plan,
+            created_at=time.time(),
+            reason=reason,
+            step_mapping=step_mapping
+        )
+        self.plan_versions.append(version)
+
+    def get_step_key(self, step_index: int) -> str:
+        """Generate unique key for a step in current plan"""
+        plan_version = len(self.plan_versions) - 1
+        return f"{plan_version}:{step_index}"
+
+    def record_attempt(self, 
+                      step_index: int,
+                      detailed_plan: StepPlan,
+                      execution_success: bool,
+                      step_completed: bool,
+                      evaluation_reasoning: str,
+                      screen_state: Dict):
+        """Record a new attempt for a plan step"""
+        step_key = self.get_step_key(step_index)
+        
+        if step_key not in self.step_histories:
+            self.step_histories[step_key] = PlanStepHistory(
+                plan_step_index=step_index,
+                plan_step_description=self.current_plan.steps[step_index].description if self.current_plan else "",
+                attempts=[]
+            )
+        
+        attempt = StepAttempt.create_new(
+            detailed_plan=detailed_plan,
+            execution_success=execution_success,
+            step_completed=step_completed,
+            evaluation_reasoning=evaluation_reasoning,
+            screen_state=screen_state
+        )
+        self.step_histories[step_key].add_attempt(attempt)
+
+    def get_step_history(self, step_index: int, include_mapped: bool = True) -> List[PlanStepHistory]:
+        """
+        Get the complete history for a step, including mapped steps from previous plans
+        
+        Args:
+            step_index: Current step index
+            include_mapped: Whether to include history from mapped steps in previous plans
+        """
+        histories = []
+        
+        # Get current plan's history
+        current_key = self.get_step_key(step_index)
+        if current_key in self.step_histories:
+            histories.append(self.step_histories[current_key])
+        
+        if include_mapped:
+            # Look for mapped steps in previous plans
+            for version_idx in range(len(self.plan_versions) - 1, -1, -1):
+                version = self.plan_versions[version_idx]
+                if version.step_mapping:
+                    # Find if current step maps to any step in this version
+                    for old_idx, new_idx in version.step_mapping.items():
+                        if new_idx == step_index:
+                            old_key = f"{version_idx}:{old_idx}"
+                            if old_key in self.step_histories:
+                                histories.append(self.step_histories[old_key])
+        
+        return histories
+
+    def get_current_step_history(self, include_mapped: bool = True) -> List[PlanStepHistory]:
+        """Get the history for the current step, including mapped steps"""
+        return self.get_step_history(self.current_step, include_mapped)
+
+    def to_json(self, file_path: str):
+        """Serialize TaskContext to a JSON file"""
+        with open(file_path, 'w') as file:
+            json.dump({
+                'user_task': self.user_task,
+                'plan_versions': [
+                    {
+                        'plan': version.plan.to_dict(),
+                        'created_at': version.created_at,
+                        'reason': version.reason,
+                        'step_mapping': version.step_mapping
+                    }
+                    for version in self.plan_versions
+                ],
+                'current_step': self.current_step,
+                'current_phase': self.current_phase,
+                'observations': self.observations,
+                'step_histories': {
+                    key: history.to_dict()
+                    for key, history in self.step_histories.items()
+                }
+            }, file, indent=4)

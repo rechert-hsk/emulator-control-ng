@@ -1,8 +1,8 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from models.api import Model
 from vision.vision_analysis import ScreenAnalysis
 from dataclasses import dataclass
-from task_execution.data_structures import PlanCondition, PlanStep, ExecutionPlan, TaskContext
+from task_execution.data_structures import PlanCondition, PlanStep, ExecutionPlan, TaskContext, StepPlan
 
 class TaskPlanner:
     """Creates high-level execution plans based on task goals and UI state"""
@@ -108,23 +108,56 @@ class TaskPlanner:
             print(f"Failed to create execution plan: {str(e)}")
             raise Exception("Failed to create execution plan")
         
-    def evaluate_progress(self, current_context: TaskContext, screen: ScreenAnalysis) -> bool:
+    def evaluate_progress(self, 
+                     current_context: TaskContext, 
+                     screen: ScreenAnalysis, 
+                     previous_step_plan: Optional[StepPlan] = None,
+                     previous_step_plan_success: bool = False) -> bool:
         """
         Evaluate the current progress and determine next steps.
         Returns True if task is completed successfully, False otherwise.
         """
-        current_step = current_context.plan.steps[current_context.current_step]
+        if current_context.current_plan is None:
+            raise ValueError("Current plan is None")
+        current_step = current_context.current_plan.steps[current_context.current_step]
+        step_histories = current_context.get_current_step_history(include_mapped=True)
         
+        # Build evaluation context from all relevant history
+        execution_context = ""
+        if step_histories:
+            execution_context = f"""
+            Previous attempts for current goal (including mapped steps from previous plans):
+            """
+            for history in step_histories:
+                execution_context += f"""
+                Step: {history.plan_step_description}
+                Total attempts: {len(history.attempts)}
+                Failed attempts: {len(history.all_failed_attempts)}
+                
+                Attempt history:
+                """
+                for i, attempt in enumerate(history.attempts, 1):
+                    execution_context += f"""
+                    Attempt {i}:
+                    - Plan: {attempt.detailed_plan.plan_description}
+                    - Actions taken: {', '.join(str(step) for step in attempt.detailed_plan.steps)}
+                    - Technical success: {attempt.execution_success}
+                    - Step completed: {attempt.step_completed}
+                    - Reasoning: {attempt.evaluation_reasoning}
+                    """
+
         prompt = f"""
         Evaluate the current progress of task execution.
 
         Original task goal: {current_context.user_task}
-        Current step ({current_context.current_step + 1} of {len(current_context.plan.steps)}): 
+        Current step ({current_context.current_step + 1} of {len(current_context.current_plan.steps)}):  # Fixed this line
         {current_step.description}
         
         Step's expected outcome:
         {current_step.expected_outcome.description if current_step.expected_outcome else 'Unknown'}
         Expected elements: {', '.join(current_step.expected_outcome.key_elements) if current_step.expected_outcome else 'Unknown'}
+
+        {execution_context}
 
         Current screen elements:
         {screen.elements}
@@ -132,7 +165,11 @@ class TaskPlanner:
         Evaluate:
         1. Has this specific step been completed based on its expected outcome?
         2. Does the current screen state match what we need to proceed?
-        3. Most importantly - has the original task goal "{current_context.user_task}" been achieved?
+        3. Most importantly - has the original task goal been achieved?
+
+        Consider:
+        - Previous failed attempts for this step and why they failed
+        - Whether the technical success of actions actually achieved the desired outcome
 
         Format response as JSON:
         {{
@@ -140,13 +177,9 @@ class TaskPlanner:
             "reasoning": "Detailed explanation of the decision",
             "next_action": "proceed" or "replan",
             "success_criteria_met": ["list", "of", "matched criteria"],
-            "task_goal_achieved": false
+            "task_goal_achieved": false,
+            "failure_analysis": "If step not completed, analysis of why previous attempts failed"
         }}
-
-        IMPORTANT: 
-        - task_goal_achieved should only be true if the original task "{current_context.user_task}" 
-        has been fully accomplished, not just when a step is completed
-        - Completing a planning step is not the same as achieving the task goal
         """
 
         try:
@@ -155,22 +188,32 @@ class TaskPlanner:
 
             # First check if overall task is complete
             if evaluation.get("task_goal_achieved", False):
-                if current_context.plan.is_complete:
+                if current_context.current_plan.is_complete:  # Fixed this line
                     return True
 
             # Handle step progress
             if evaluation["step_completed"]:
                 if evaluation["next_action"] == "proceed":
-                    if current_context.current_step < len(current_context.plan.steps) - 1:
+                    if current_context.current_step < len(current_context.current_plan.steps) - 1:  # Fixed this line
                         print(f"Step {current_context.current_step + 1} completed successfully")
                         current_context.current_step += 1
                     return False
-                
+                    
             if evaluation["next_action"] == "replan":
-                # Create new plan from current state
                 print("Replanning required")
+                print(f"Reason: {evaluation.get('failure_analysis', 'No analysis provided')}")
+                print("new plan")
                 new_plan = self.create_execution_plan(current_context.user_task, screen)
-                current_context.plan = new_plan
+                new_plan.print_plan()
+                
+                # Try to map steps from old plan to new plan
+                step_mapping = self._map_plans(current_context.current_plan, new_plan)  # Fixed this line
+                
+                current_context.add_new_plan(
+                    new_plan=new_plan,
+                    reason=evaluation["reasoning"],
+                    step_mapping=step_mapping
+                )
                 current_context.current_step = 0
                 return False
 
@@ -179,3 +222,18 @@ class TaskPlanner:
         except Exception as e:
             print(f"Failed to evaluate progress: {str(e)}")
             return False
+
+    def _map_plans(self, old_plan: ExecutionPlan, new_plan: ExecutionPlan) -> Dict[int, int]:
+        """
+        Try to map steps between old and new plans based on similarity.
+        Returns a dictionary mapping old step indices to new step indices.
+        """
+        # This is a simplified version - you might want to use more sophisticated
+        # similarity matching based on your specific needs
+        mapping = {}
+        for old_idx, old_step in enumerate(old_plan.steps):
+            for new_idx, new_step in enumerate(new_plan.steps):
+                if old_step.description.lower() == new_step.description.lower():
+                    mapping[old_idx] = new_idx
+                    break
+        return mapping

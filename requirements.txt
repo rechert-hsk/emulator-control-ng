@@ -1,0 +1,5 @@
+vncdotool
+opencv-python
+scikit-image
+google-genai
+google-generativeai

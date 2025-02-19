@@ -98,6 +98,7 @@ class TaskExecutionController:
 
             if verdict:
                 print("Task completed successfully")
+                print(self.current_context.create_execution_summary())
                 return True
                 
             print("Let's plan the next actions...")

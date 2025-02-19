@@ -319,3 +319,79 @@ class TaskContext:
                     for key, history in self.step_histories.items()
                 }
             }, file, indent=4)
+    def create_execution_summary(self) -> str:
+        """
+        Create a human-readable summary of the entire task execution,
+        including all plans, steps, and attempts.
+        """
+        summary = []
+        
+        # Task Overview
+        summary.append("=== Task Execution Summary ===")
+        summary.append(f"Task Goal: {self.user_task}")
+        summary.append(f"Total Plan Versions: {len(self.plan_versions)}\n")
+        
+        # Summarize each plan version
+        for version_idx, plan_version in enumerate(self.plan_versions):
+            summary.append(f"Plan Version {version_idx + 1}")
+            summary.append(f"Created at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(plan_version.created_at))}")
+            if version_idx > 0:
+                summary.append(f"Reason for replanning: {plan_version.reason}")
+            if plan_version.step_mapping:
+                summary.append("Step mappings from previous plan:")
+                for old_idx, new_idx in plan_version.step_mapping.items():
+                    summary.append(f"  - Step {old_idx} → Step {new_idx}")
+            summary.append("")
+            
+            # Summarize each step in this plan
+            for step_idx, step in enumerate(plan_version.plan.steps):
+                summary.append(f"Step {step_idx + 1}: {step.description}")
+                summary.append(f"Expected outcome: {step.expected_outcome.description if step.expected_outcome else 'Unknown'}")
+                
+                # Get execution history for this step
+                step_key = f"{version_idx}:{step_idx}"
+                if step_key in self.step_histories:
+                    history = self.step_histories[step_key]
+                    summary.append(f"Execution attempts: {len(history.attempts)}")
+                    
+                    # Detail each attempt
+                    for attempt_idx, attempt in enumerate(history.attempts, 1):
+                        summary.append(f"\nAttempt {attempt_idx}:")
+                        summary.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(attempt.timestamp))}")
+                        summary.append("Detailed actions:")
+                        for detailed_step in attempt.detailed_plan.steps:
+                            action_desc = f"- {detailed_step.action}"
+                            if detailed_step.target:
+                                action_desc += f" on '{detailed_step.target}'"
+                            if detailed_step.coordinates:
+                                action_desc += f" at {detailed_step.coordinates}"
+                            if detailed_step.context and 'input_text' in detailed_step.context:
+                                action_desc += f" with text '{detailed_step.context['input_text']}'"
+                            summary.append(f"  {action_desc}")
+                        
+                        summary.append(f"Technical execution: {'Successful' if attempt.execution_success else 'Failed'}")
+                        summary.append(f"Step completion: {'Completed' if attempt.step_completed else 'Not completed'}")
+                        summary.append(f"Evaluation: {attempt.evaluation_reasoning}")
+                        
+                        # Add screen state summary if available
+                        if attempt.screen_state and 'elements' in attempt.screen_state:
+                            summary.append("Screen state during attempt:")
+                            for element in attempt.screen_state['elements'][:5]:  # Limit to first 5 elements
+                                summary.append(f"  - {element}")
+                            if len(attempt.screen_state['elements']) > 5:
+                                summary.append("    ... and more elements")
+                
+                summary.append("\n" + "-"*50 + "\n")  # Section separator
+        
+        # Add final status
+        summary.append("Final Status:")
+        summary.append(f"Current plan version: {len(self.plan_versions)}")
+        summary.append(f"Current step: {self.current_step + 1}")
+        summary.append(f"Current phase: {self.current_phase}")
+        
+        return "\n".join(summary)
+
+    def save_execution_summary(self, file_path: str):
+        """Save the execution summary to a file"""
+        with open(file_path, 'w') as f:
+            f.write(self.create_execution_summary())

@@ -147,41 +147,50 @@ class TaskPlanner:
                     """
 
         prompt = f"""
-        Evaluate the current progress of task execution.
+        You are a strict automated testing system evaluating task execution progress. Your evaluation must be precise and based on clear evidence.
 
-        Original task goal: {current_context.user_task}
-        Current step ({current_context.current_step + 1} of {len(current_context.current_plan.steps)}):  # Fixed this line
-        {current_step.description}
+        TASK INFORMATION:
+        - Original Goal: {current_context.user_task}
+        - Current Step: {current_context.current_step + 1} of {len(current_context.current_plan.steps)}
+        - Step Description: {current_step.description}
         
-        Step's expected outcome:
-        {current_step.expected_outcome.description if current_step.expected_outcome else 'Unknown'}
-        Expected elements: {', '.join(current_step.expected_outcome.key_elements) if current_step.expected_outcome else 'Unknown'}
+        EXPECTED OUTCOME:
+        - Description: {current_step.expected_outcome.description if current_step.expected_outcome else 'Unknown'}
+        - Required Elements: {', '.join(current_step.expected_outcome.key_elements) if current_step.expected_outcome else 'Unknown'}
+
+        CURRENT STATE:
+        Visible Elements: {screen.elements}
 
         {execution_context}
 
-        Current screen elements:
-        {screen.elements}
+        EVALUATION RULES:
+        1. Step Completion:
+           - Mark step_completed=true ONLY if ALL expected elements are present
+           - The mere ability to perform an action is NOT completion
+           - Visual confirmation of the expected outcome is required
 
-        Evaluate:
-        1. Has this specific step been completed based on its expected outcome?
-        2. Does the current screen state match what we need to proceed?
-        3. Most importantly - has the original task goal been achieved?
+        2. Screen State:
+           - Verify all required elements are visible and in the expected state
+           - Compare current elements against expected_outcome elements
 
-        Consider:
-        - Previous failed attempts for this step and why they failed
-        - Whether the technical success of actions actually achieved the desired outcome
+        3. Task Goal:
+           - Only mark task_goal_achieved=true if final objective is verifiably complete
+           - Partial progress is not sufficient
 
-        Format response as JSON:
+        REQUIRED RESPONSE FORMAT:
         {{
-            "step_completed": true/false,
-            "reasoning": "Detailed explanation of the decision",
+            "step_completed": boolean,
+            "reasoning": "Detailed comparison of expected vs actual state",
             "next_action": "proceed" or "replan",
-            "success_criteria_met": ["list", "of", "matched criteria"],
-            "task_goal_achieved": false,
-            "failure_analysis": "If step not completed, analysis of why previous attempts failed"
+            "success_criteria_met": ["list each matched expected element"],
+            "missing_criteria": ["list expected elements not found"],
+            "task_goal_achieved": boolean,
+            "failure_analysis": "Required if step_completed=false: what's missing and why"
         }}
-        """
 
+        CRITICAL: Your evaluation must be conservative - when in doubt, mark as incomplete.
+        """
+        
         try:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
             evaluation = Model.parse_json(response)

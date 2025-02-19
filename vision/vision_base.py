@@ -60,6 +60,11 @@ class VisionLLMBase(ABC):
         pass
     
 
+    @abstractmethod
+    def get_click_coordinates_by_description(self, description: str) -> Dict[str, int]:
+        """Get click coordinates by description"""
+        pass
+
     def get_click_coordinates(self, element: UIElement) -> Dict[str, int]:
         """Get click coordinates for a specific element"""
         if not element.bounding_box:

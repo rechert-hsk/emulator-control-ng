@@ -1,8 +1,9 @@
+import time
 from typing import List, Dict, Optional, Any
 from models.api import Model
 from vision.vision_analysis import ScreenAnalysis
 from dataclasses import dataclass
-from task_execution.data_structures import PlanCondition, PlanStep, ExecutionPlan, TaskContext, StepPlan
+from task_execution.data_structures import PlanCondition, PlanStep, ExecutionPlan, PlanStepHistory, StepAttempt, TaskContext, StepPlan
 
 class TaskPlanner:
     """Creates high-level execution plans based on task goals and UI state"""
@@ -28,49 +29,57 @@ class TaskPlanner:
     def create_execution_plan(self, task_description: str, screen: ScreenAnalysis) -> ExecutionPlan:
         """Create high-level execution plan based on task and current screen"""
         prompt = f"""
-        Create a plan for this task:
+        Task Goal:
         {task_description}
 
-        Current screen shows:
-        {screen.elements}
+        Current Screen Analysis:
+        - Visible Elements: {screen.elements}
+        - Screen Type: {screen.environment.interface_type.name if screen.environment else 'Unknown'}
+        - Text Content: {screen.text_analysis if hasattr(screen, 'text_analysis') else 'None'}
 
-        Create a sequence of steps, where each step includes:
-        1. Description of what needs to be done
-        2. What should be true/visible before the step
-        3. What should be true/visible after (if predictable)
+        Create a precise execution plan that:
+        1. Starts with ONLY the currently visible elements and state
+        2. Plans each step based on confirmed visible elements
+        3. Avoids assumptions about future states unless explicitly predictable
+        4. Requires replanning when entering unknown states
 
-        IMPORTANT:
-        The plan must end in one of two ways:
-        1. Final step completes the task with clear success criteria
-        2. A step leads to an unknown outcome, requiring replanning
-        Never leave a plan in an incomplete state.
+        Rules for Step Planning:
+        - Each step must be based on currently visible/confirmed UI elements
+        - Only include actions that can be performed with visible elements
+        - When an action leads to an unknown state, stop and require replanning
+        - Do not assume the presence of elements that aren't confirmed visible
+        - For navigation, plan only one screen transition at a time
 
         Format response as JSON:
         {{
             "initial_state": {{
-                "description": "Natural language description of current state",
-                "key_elements": ["list", "of", "important", "UI elements"]
+                "description": "Detailed description of current visible elements and state",
+                "key_elements": ["list", "of", "currently", "visible", "elements"]
             }},
             "steps": [
                 {{
-                    "description": "Natural language description of what to do",
+                    "description": "Specific action to take with visible elements",
                     "precondition": {{
-                        "description": "What should be true before this step",
-                        "key_elements": ["required", "UI", "elements"]
+                        "description": "What must be visible/true before this step",
+                        "key_elements": ["required", "visible", "elements"]
                     }},
                     "expected_outcome": {{
-                        "description": "What should be true after",
-                        "key_elements": ["expected", "UI", "elements"]
-                    }} or null
+                        "description": "What should be immediately observable after",
+                        "key_elements": ["expected", "visible", "elements"]
+                    }} or null if outcome unknown
                 }}
             ],
-            "is_complete": true/false
+            "is_complete": false if unknown outcome, true if goal achieved
         }}
 
-        Set is_complete:
-        - true if the final step achieves the task goal
-        - false if plan ends with unknown state requiring replanning
+        Important:
+        - Only include UI elements that are currently visible in initial_state
+        - Plan steps only based on confirmed visible elements
+        - Set expected_outcome to null when next state is unpredictable
+        - Set is_complete=false when plan needs replanning
+        - Each step must be immediately actionable based on visible elements
         """
+
 
         try:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
@@ -121,30 +130,16 @@ class TaskPlanner:
             raise ValueError("Current plan is None")
         current_step = current_context.current_plan.steps[current_context.current_step]
         step_histories = current_context.get_current_step_history(include_mapped=True)
+
+        screen_state = {
+            'elements': [str(elem) for elem in screen.elements],
+            'text_content': screen.text_analysis if hasattr(screen, 'text_content') else None,
+            'interface_type': screen.environment.interface_type.name if screen.environment else 'Unknown',
+            'timestamp': time.time()
+        }
         
-        # Build evaluation context from all relevant history
-        execution_context = ""
-        if step_histories:
-            execution_context = f"""
-            Previous attempts for current goal (including mapped steps from previous plans):
-            """
-            for history in step_histories:
-                execution_context += f"""
-                Step: {history.plan_step_description}
-                Total attempts: {len(history.attempts)}
-                Failed attempts: {len(history.all_failed_attempts)}
-                
-                Attempt history:
-                """
-                for i, attempt in enumerate(history.attempts, 1):
-                    execution_context += f"""
-                    Attempt {i}:
-                    - Plan: {attempt.detailed_plan.plan_description}
-                    - Actions taken: {', '.join(str(step) for step in attempt.detailed_plan.steps)}
-                    - Technical success: {attempt.execution_success}
-                    - Step completed: {attempt.step_completed}
-                    - Reasoning: {attempt.evaluation_reasoning}
-                    """
+
+        execution_context = self._build_execution_context(step_histories)
 
         prompt = f"""
         You are a strict automated testing system evaluating task execution progress. Your evaluation must be precise and based on clear evidence.
@@ -190,10 +185,29 @@ class TaskPlanner:
 
         CRITICAL: Your evaluation must be conservative - when in doubt, mark as incomplete.
         """
-        
+
         try:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
             evaluation = Model.parse_json(response)
+
+            # Record attempt if we have a previous step plan
+            if previous_step_plan:
+                attempt = StepAttempt(
+                    timestamp=time.time(),
+                    detailed_plan=previous_step_plan,
+                    execution_success=previous_step_plan_success,
+                    step_completed=evaluation["step_completed"],
+                    evaluation_reasoning=evaluation["reasoning"],
+                    screen_state=screen_state,
+                    failure_details=evaluation.get("failure_analysis") if not evaluation["step_completed"] else None,
+                    interaction_result=f"Success criteria met: {', '.join(evaluation.get('success_criteria_met', []))}"
+                )
+                
+                current_context.record_attempt(
+                    step_index=current_context.current_step,
+                    attempt=attempt  # Pass the complete StepAttempt object
+                )
+
 
             # First check if overall task is complete
             if evaluation.get("task_goal_achieved", False):
@@ -231,6 +245,29 @@ class TaskPlanner:
         except Exception as e:
             print(f"Failed to evaluate progress: {str(e)}")
             return False
+
+    def _build_execution_context(self, step_histories: List[PlanStepHistory]) -> str:
+        """Build detailed execution context from step histories"""
+        if not step_histories:
+            return "No previous attempts"
+            
+        context = []
+        for history in step_histories:
+            context.append(f"\nStep '{history.plan_step_description}':")
+            context.append(f"Total attempts: {len(history.attempts)}")
+            
+            for i, attempt in enumerate(history.attempts, 1):
+                context.append(f"\nAttempt {i}:")
+                context.append(f"- Actions taken:")
+                for step in attempt.detailed_plan.steps:
+                    context.append(f"  * {str(step)}")
+                context.append(f"- Technical success: {attempt.execution_success}")
+                context.append(f"- Step completed: {attempt.step_completed}")
+                context.append(f"- Reasoning: {attempt.evaluation_reasoning}")
+                if attempt.failure_details:
+                    context.append(f"- Failure details: {attempt.failure_details}")
+        
+        return "\n".join(context)
 
     def _map_plans(self, old_plan: ExecutionPlan, new_plan: ExecutionPlan) -> Dict[int, int]:
         """

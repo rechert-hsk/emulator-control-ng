@@ -97,39 +97,42 @@ class StepPlanner:
         history_context = self._format_step_history(step_histories) if step_histories else "No previous attempts"
 
         return f"""
-        Generate a precise UI interaction step to accomplish this goal.
+        You are a UI automation expert that converts high-level tasks into precise, atomic UI interactions.
 
-        Current Plan Step: {current_plan_step.description}
-        Required Elements: {', '.join(current_plan_step.precondition.key_elements)}
-        Expected Outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
+        YOUR TASK: Generate a single UI interaction step to accomplish this goal:
+        {current_plan_step.description}
+
+        CONSTRAINTS:
+        - Required elements must be present: {', '.join(current_plan_step.precondition.key_elements)}
+        - Expected outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
+        - Must use only elements that are currently visible
+        - Must be exactly ONE specific interaction (click, type, press key, or select)
         
-        Interface Type: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
+        CONTEXT:
+        Interface: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
         
-        Current Screen Elements:
+        Available Elements:
         {screen_context}
         
-        Previous Attempts History:
+        Previous Attempts:
         {history_context}
 
-        Requirements:
-        1. Generate EXACTLY ONE specific UI interaction
-        2. Use only currently visible elements
-        3. Consider previous failed attempts
-        4. Choose a different approach if previous attempts failed
-        5. Ensure the action moves towards the expected outcome
-
-        Return as JSON:
+        INSTRUCTIONS:
+        1. Analyze the available elements and required outcome
+        2. If previous attempts failed, choose a different approach
+        3. Generate a single, specific interaction that moves towards the goal
+        4. Format response as JSON with this exact schema:
         {{
-            "description": "Detailed description of what needs to be done and why",
-            "action": "exactly one of: click, type, press_key, select",
-            "target": "specific element to interact with based on visible elements",
+            "description": "Clear explanation of what will be done and why",
+            "action": "<click|type|press_key|select>",
+            "target": "id_of_target_element",
             "context": {{
-                "input_text": "exact text to type (for text inputs)",
-                "input_format": "any special format requirements",
-                "append_enter": boolean,
+                "input_text": "text to type (for text inputs only)",
+                "input_format": "format requirements if any",
+                "append_enter": true/false,
                 "max_length": number,
-                "special_characters": [],
-                "additional_notes": "any other relevant information"
+                "special_characters": ["list", "of", "special", "chars"],
+                "additional_notes": "other relevant details"
             }}
         }}
         """
@@ -169,7 +172,7 @@ class StepPlanner:
         try:
             context_data = self._process_step_context(step_data)
             coordinates = self._get_step_coordinates(step_data, vision_analysis)
-            
+
             return DetailedStep(
                 description=step_data.get('description') or "",
                 action=step_data.get('action') or "",
@@ -182,89 +185,6 @@ class StepPlanner:
             logger.error(f"Error creating detailed step: {str(e)}")
             return None
         
-    def _generate_step(self,
-                      plan_step,
-                      context: TaskContext,
-                      vision_analysis: ScreenAnalysis,
-                      screen_context: str,
-                      step_histories: List[PlanStepHistory]) -> Optional[dict]:
-        """Generate detailed step data based on plan step and execution history"""
-        try:
-            # Build history context
-            history_context = ""
-            if step_histories:
-                history_context = "Previous attempts for this step:\n"
-                for history in step_histories:
-                    history_context += f"""
-                    Step: {history.plan_step_description}
-                    Total attempts: {len(history.attempts)}
-                    Failed attempts: {len(history.all_failed_attempts)}
-                    
-                    Previous attempts:
-                    """
-                    for i, attempt in enumerate(history.attempts, 1):
-                        history_context += f"""
-                        Attempt {i}:
-                        - Plan: {attempt.detailed_plan.plan_description}
-                        - Actions: {', '.join(str(step) for step in attempt.detailed_plan.steps)}
-                        - Success: {attempt.execution_success}
-                        - Completed: {attempt.step_completed}
-                        - Reasoning: {attempt.evaluation_reasoning}
-                        """
-
-            step_prompt = f"""
-            Generate a precise UI interaction step to accomplish this goal.
-
-            Current Plan Step: {plan_step.description}
-            Required Elements: {', '.join(plan_step.precondition.key_elements)}
-            Expected Outcome: {plan_step.expected_outcome.description if plan_step.expected_outcome else 'Unknown'}
-            
-            Interface Type: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
-            Current Screen Elements:
-            {screen_context}
-            
-            {history_context}
-
-            Consider:
-            1. Previously failed attempts and why they failed
-            2. What approaches haven't been tried yet
-            3. Whether a different strategy is needed
-
-            You must return EXACTLY ONE specific UI interaction as JSON:
-            {{
-                "description": "what needs to be done and why",
-                "action": "exactly one of: click, type, press_key, select",
-                "target": "specific element to interact with based on visible elements",
-                "context": {{
-                    "input_text": "exact text to type (for text inputs)",
-                    "input_format": "any special format requirements",
-                    "append_enter": boolean,
-                    "max_length": number,
-                    "special_characters": [],
-                    "additional_notes": "any other relevant information"
-                }}
-            }}
-            """
-
-            logger.debug(f"Generating step with prompt: {step_prompt}")
-            response = self.model.generate_content(step_prompt, vision_analysis.image, self.system_prompt)
-            
-            if not response:
-                logger.error("Model returned empty response")
-                return None
-                
-            step_data = Model.parse_json(response)
-            if not step_data:
-                logger.error("Failed to parse model response as JSON")
-                return None
-                
-            self._validate_step_data(step_data)
-            return step_data
-            
-        except Exception as e:
-            logger.error(f"Error in _generate_step: {str(e)}")
-            return None
-
 
     def _validate_step_data(self, step_data: dict) -> bool:
         """Validate step data has required fields"""
@@ -328,14 +248,19 @@ class StepPlanner:
     def _get_step_coordinates(self, step_data: dict, vision_analysis: ScreenAnalysis) -> Optional[tuple]:
         """Get coordinates for a step's target element if needed"""
         target = step_data.get('target')
+        print(f"Target: {target}")
+        print(f"Capabilities: {vision_analysis.capabilities}")  # Added for debugging
         if target and vision_analysis.capabilities and vision_analysis.capabilities.has_mouse:
             target_elem = self._find_ui_element(target, vision_analysis.elements)
             if target_elem:
-                coordinates = vision_analysis.get_coordinates(target_elem)
+                print(f"Found target element: --> {target_elem}")
+                coordinates = vision_analysis.get_coordinates(target_elem, True)
+                print(f"Coordinates --> : {coordinates}")
                 if isinstance(coordinates, dict):
                     return tuple(coordinates.values())
                 return coordinates
-        return None
+            else:
+                vision_analysis.get_coordinates_by_description(f"{target}")
 
     def _create_ui_context(self, ui_elements: List[UIElement]) -> str:
         """Create structured description of current UI state"""
@@ -369,111 +294,3 @@ class StepPlanner:
             if element.id and target.lower() in element.id.lower():
                 return element
         return None
-
-    def _generate_complexity_prompt(self, context: TaskContext, screen_context: str, interface_type: InterfaceType) -> str:
-        """Generate the prompt for analyzing task complexity"""
-        return f"""
-        Analyze this task and determine if it requires multiple steps.
-
-        Definition of a step:
-        - A step is a single atomic user interaction with the system
-        - Examples of single steps:
-        * Clicking one button/link
-        * Typing a single value into one field
-        * Pressing one key or key combination
-        * Selecting one item from a dropdown
-        * Checking/unchecking one checkbox
-        - A step should NOT include:
-        * Multiple clicks or interactions
-        * Navigation across different screens
-        * Complex sequences that require screen changes
-        * Actions that require waiting for system responses
-        
-        Scope limitations:
-        - Focus on the CURRENT task 
-        - Only consider actions possible on the CURRENT screen
-        - Any step must be possible with the currently visible/available UI elements
-        
-        Goal: {context.user_task}  # Updated from context.goal.description
-        Current Phase: {context.current_phase}
-        Interface Type: {interface_type.name}
-        
-        The main UI elements with known coordinates are:
-        {screen_context}
-        
-        Recent Observations:
-        {self._format_observations(context.observations)}
-        
-        Return as JSON:
-        {{
-            "requires_multiple_steps": boolean,
-            "estimated_steps": number,
-            "explanation": "Detailed explanation of why multiple steps are needed (if applicable)",
-            "within_current_screen": boolean,
-            "limitations": "Any limitations or concerns about completing the goal on current screen",
-            "plan_description": "Brief high-level description of the planned steps",
-            "expected_outcome": "Description of what should be achieved after completing all steps"
-        }}
-        """
-
-    def _generate_steps_prompt(self, 
-                        context: TaskContext,
-                        screen_context: str,
-                        interface_type: InterfaceType,
-                        require_single_step: bool,
-                        plan_description: str,
-                        expected_outcome: str) -> str:
-        """Generate the prompt for step generation"""
-        return f"""
-        {f'Generate a SINGLE atomic step.' if require_single_step else 'Break down the required action into individual steps.'}
-        
-        Goal: {context.user_task}  # Updated from context.goal.description
-        Current Phase: {context.current_phase}
-        Interface Type: {interface_type.name}
-        
-        Plan Description: {plan_description}
-        Expected Outcome: {expected_outcome}
-        
-        Current Screen State:
-        {screen_context}
-        
-        Definition of a SINGLE atomic step:
-        - ONE mouse click on a specific element
-        - ONE key press or key combination
-        - Typing into ONE input field
-        - Selecting ONE item from a list/dropdown
-        - Checking/unchecking ONE checkbox
-        
-        For text input actions, you MUST specify:
-        - The exact text to be typed
-        - Any special characters or formatting required
-        - Whether the input should end with Enter/Return
-        - Any maximum length restrictions visible on screen
-        
-        Return as JSON{' array' if not require_single_step else ''} with{' each step containing' if not require_single_step else ''}:
-        {{
-            "description": "what needs to be done and why",
-            "action": "specific UI action (click, type, press_key etc)",
-            "target": "element to interact with",
-            "context": {{
-                "input_text": "exact text to type (for text inputs)",
-                "input_format": "any special format requirements", 
-                "append_enter": boolean,
-                "max_length": number or null,
-                "special_characters": ["list", "of", "special", "chars", "needed"],
-                "additional_notes": "any other relevant information"
-            }}
-        }}
-        """
-
-    def _format_observations(self, observations: List[str]) -> str:
-        """Format recent observations for prompt"""
-        if not observations:
-            return "No recent observations"
-        return "\n".join(f"- {obs}" for obs in observations)
-
-    def _format_actions(self, actions: List[str]) -> str:
-        """Format action history for prompt"""
-        if not actions:
-            return "No previous actions"
-        return "\n".join(f"- {action}" for action in actions)

@@ -176,16 +176,16 @@ if __name__ == "__main__":
     from emulator.emulator_controller import EmulatorController
     from emulator.computer import QemuComputer, Drive, DriveType, DriveInterface
     import time
-    cdrom_path = Path("data/en_windows_xp_sp3.iso")
+    cdrom_path = Path("data/WINDOWS_XP_1.iso")
     disk_path = Path("data/new_disk.qcow2")
 
     computer = QemuComputer()
- #   computer.add_drive(Drive(
- #       path=Path("data/en_windows_xp_sp3.iso"),
- #       drive_type=DriveType.CDROM,
- #       readonly=True,
- #       boot=True
- #   ))
+    computer.add_drive(Drive(
+        path=Path("data/WINDOWS_XP_1.iso"),
+        drive_type=DriveType.CDROM,
+        readonly=True,
+        boot=True
+    ))
 
     computer.add_drive(Drive(
         path=Path("data/xp_disk.qcow2"), 
@@ -230,7 +230,9 @@ if __name__ == "__main__":
     # """
 
     task_description = """
-        make sure that the screensaver is disabled.
+        Open the CDROM 
+        Open the folder Apps 
+        install Works 8.5
     """
 
     success = task_execution_controller.execute_task(task_description)

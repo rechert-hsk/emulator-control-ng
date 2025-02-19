@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from enum import Enum, auto
 from PIL import Image
-from vision.vision_base import UIElement
+from vision.vision_base import UIElement, VisionLLMBase
 from models.api import Model
 import datetime
 import json
@@ -139,7 +139,11 @@ IMPORTANT:
 - Include only clearly visible/available options
 - Describe the interface from a user's perspective"""
 
-    def __init__(self, image: Image.Image = None, model=None, provider=None, provider_coords=None):
+    def __init__(self, 
+                 image: Optional[Image.Image] = None, 
+                 model: Optional[Model] = None, 
+                 provider: Optional[VisionLLMBase] = None, 
+                 provider_coords: Optional[VisionLLMBase] = None):
         
         if not image and not model and not provider and not provider_coords:
             self.debug_mode = True
@@ -356,6 +360,9 @@ IMPORTANT:
         self.text_analysis = value
         self._is_text_analyzed = True
 
+    def get_coordinates_by_description(self, description: str, update: bool = False) -> dict:
+        return self.provider_coords.get_click_coordinates_by_description(description)
+
     def get_coordinates(self, elem: UIElement, update: bool = False) -> dict:
         """Lazily add click coordinates if needed"""
 
@@ -364,9 +371,9 @@ IMPORTANT:
             
         self.detect_elements()
 
-        # print(f"Getting coordinates for {elem}")
+        print(f"Getting coordinates for {elem}")
 
-        if not update and elem.click_coordinates:
+        if not update and elem.click_coordinates is not None:
             return elem.click_coordinates
 
         if self.capabilities.has_mouse:
@@ -468,7 +475,7 @@ IMPORTANT:
         self.image.save(screenshot_path)
         
         # Save environment analysis if available
-        if self._is_environment_detected:
+        if self._is_environment_detected and self.environment and self.capabilities and self.required_analysis:
             env_data = {
                 "environment": {
                     "os": self.environment.os,

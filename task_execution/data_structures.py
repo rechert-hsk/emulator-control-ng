@@ -110,9 +110,23 @@ class DetailedStep(StepInstruction):
     expected_result: Optional[str] = None
 
     def __str__(self):
-        return (f"DetailedStep(description={self.description}, action={self.action}, "
-                f"target={self.target}, coordinates={self.coordinates}, "
-                f"context={self.context}, expected_result={self.expected_result})")
+        details = []
+        details.append(f"Action: {self.action}")
+        if self.description:
+            details.append(f"Description: {self.description}")
+        if self.target:
+            details.append(f"Target: {self.target}")
+        if self.coordinates:
+            details.append(f"Coordinates: {self.coordinates}")
+        if self.context:
+            if 'input_text' in self.context:
+                details.append(f"Input: {self.context['input_text']}")
+            if 'additional_notes' in self.context:
+                details.append(f"Notes: {self.context['additional_notes']}")
+        if self.expected_result:
+            details.append(f"Expected: {self.expected_result}")
+        return " | ".join(details)
+   
 
 @dataclass
 class StepPlan:
@@ -135,6 +149,8 @@ class StepAttempt:
     step_completed: bool  # Whether the high-level plan step was achieved
     evaluation_reasoning: str  # Why the attempt succeeded/failed
     screen_state: Dict  # UI state at time of evaluation
+    failure_details: Optional[str] = None
+    interaction_result: Optional[str] = None
 
     @staticmethod
     def create_new(
@@ -152,6 +168,22 @@ class StepAttempt:
             evaluation_reasoning=evaluation_reasoning,
             screen_state=screen_state
         )
+
+    def get_screen_summary(self) -> str:
+        """Create a concise summary of the screen state"""
+        if not self.screen_state or 'elements' not in self.screen_state:
+            return "No screen state recorded"
+        
+        elements = self.screen_state['elements']
+        summary = []
+        for element in elements[:5]:  # Show first 5 elements
+            if isinstance(element, dict):
+                summary.append(f"- {element.get('type', 'Unknown')}: {element.get('text', 'No text')}")
+            else:
+                summary.append(f"- {str(element)}")
+        if len(elements) > 5:
+            summary.append(f"... and {len(elements) - 5} more elements")
+        return "\n".join(summary)
 
 @dataclass
 class PlanStepHistory:
@@ -238,32 +270,7 @@ class TaskContext:
         plan_version = len(self.plan_versions) - 1
         return f"{plan_version}:{step_index}"
 
-    def record_attempt(self, 
-                      step_index: int,
-                      detailed_plan: StepPlan,
-                      execution_success: bool,
-                      step_completed: bool,
-                      evaluation_reasoning: str,
-                      screen_state: Dict):
-        """Record a new attempt for a plan step"""
-        step_key = self.get_step_key(step_index)
-        
-        if step_key not in self.step_histories:
-            self.step_histories[step_key] = PlanStepHistory(
-                plan_step_index=step_index,
-                plan_step_description=self.current_plan.steps[step_index].description if self.current_plan else "",
-                attempts=[]
-            )
-        
-        attempt = StepAttempt.create_new(
-            detailed_plan=detailed_plan,
-            execution_success=execution_success,
-            step_completed=step_completed,
-            evaluation_reasoning=evaluation_reasoning,
-            screen_state=screen_state
-        )
-        self.step_histories[step_key].add_attempt(attempt)
-
+    
     def get_step_history(self, step_index: int, include_mapped: bool = True) -> List[PlanStepHistory]:
         """
         Get the complete history for a step, including mapped steps from previous plans
@@ -292,6 +299,21 @@ class TaskContext:
                                 histories.append(self.step_histories[old_key])
         
         return histories
+    
+    def record_attempt(self, 
+                      step_index: int,
+                      attempt: StepAttempt):
+        """Record a new attempt for a plan step"""
+        step_key = self.get_step_key(step_index)
+        
+        if step_key not in self.step_histories:
+            self.step_histories[step_key] = PlanStepHistory(
+                plan_step_index=step_index,
+                plan_step_description=self.current_plan.steps[step_index].description if self.current_plan else "",
+                attempts=[]
+            )
+        
+        self.step_histories[step_key].add_attempt(attempt)
 
     def get_current_step_history(self, include_mapped: bool = True) -> List[PlanStepHistory]:
         """Get the history for the current step, including mapped steps"""
@@ -319,72 +341,52 @@ class TaskContext:
                     for key, history in self.step_histories.items()
                 }
             }, file, indent=4)
+
     def create_execution_summary(self) -> str:
-        """
-        Create a human-readable summary of the entire task execution,
-        including all plans, steps, and attempts.
-        """
         summary = []
-        
-        # Task Overview
         summary.append("=== Task Execution Summary ===")
         summary.append(f"Task Goal: {self.user_task}")
         summary.append(f"Total Plan Versions: {len(self.plan_versions)}\n")
         
-        # Summarize each plan version
         for version_idx, plan_version in enumerate(self.plan_versions):
-            summary.append(f"Plan Version {version_idx + 1}")
+            summary.append(f"\nPlan Version {version_idx + 1}")
+            summary.append("="* 50)
             summary.append(f"Created at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(plan_version.created_at))}")
             if version_idx > 0:
-                summary.append(f"Reason for replanning: {plan_version.reason}")
-            if plan_version.step_mapping:
-                summary.append("Step mappings from previous plan:")
-                for old_idx, new_idx in plan_version.step_mapping.items():
-                    summary.append(f"  - Step {old_idx} → Step {new_idx}")
-            summary.append("")
+                summary.append(f"Reason for replanning:\n{plan_version.reason}")
             
-            # Summarize each step in this plan
             for step_idx, step in enumerate(plan_version.plan.steps):
-                summary.append(f"Step {step_idx + 1}: {step.description}")
+                summary.append(f"\nStep {step_idx + 1}: {step.description}")
+                summary.append("-" * 40)
+                summary.append(f"Precondition: {step.precondition.description}")
+                summary.append(f"Required elements: {', '.join(step.precondition.key_elements)}")
                 summary.append(f"Expected outcome: {step.expected_outcome.description if step.expected_outcome else 'Unknown'}")
                 
-                # Get execution history for this step
                 step_key = f"{version_idx}:{step_idx}"
                 if step_key in self.step_histories:
                     history = self.step_histories[step_key]
-                    summary.append(f"Execution attempts: {len(history.attempts)}")
+                    summary.append(f"\nExecution Attempts ({len(history.attempts)}):")
                     
-                    # Detail each attempt
                     for attempt_idx, attempt in enumerate(history.attempts, 1):
-                        summary.append(f"\nAttempt {attempt_idx}:")
-                        summary.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(attempt.timestamp))}")
-                        summary.append("Detailed actions:")
+                        summary.append(f"\n  Attempt {attempt_idx}:")
+                        summary.append(f"  Time: {time.strftime('%H:%M:%S', time.localtime(attempt.timestamp))}")
+                        summary.append("  Actions:")
                         for detailed_step in attempt.detailed_plan.steps:
-                            action_desc = f"- {detailed_step.action}"
-                            if detailed_step.target:
-                                action_desc += f" on '{detailed_step.target}'"
-                            if detailed_step.coordinates:
-                                action_desc += f" at {detailed_step.coordinates}"
-                            if detailed_step.context and 'input_text' in detailed_step.context:
-                                action_desc += f" with text '{detailed_step.context['input_text']}'"
-                            summary.append(f"  {action_desc}")
+                            summary.append(f"    {str(detailed_step)}")
                         
-                        summary.append(f"Technical execution: {'Successful' if attempt.execution_success else 'Failed'}")
-                        summary.append(f"Step completion: {'Completed' if attempt.step_completed else 'Not completed'}")
-                        summary.append(f"Evaluation: {attempt.evaluation_reasoning}")
+                        summary.append(f"  Technical Success: {'✓' if attempt.execution_success else '✗'}")
+                        summary.append(f"  Step Completed: {'✓' if attempt.step_completed else '✗'}")
+                        summary.append(f"  Evaluation:\n    {attempt.evaluation_reasoning}")
                         
-                        # Add screen state summary if available
-                        if attempt.screen_state and 'elements' in attempt.screen_state:
-                            summary.append("Screen state during attempt:")
-                            for element in attempt.screen_state['elements'][:5]:  # Limit to first 5 elements
-                                summary.append(f"  - {element}")
-                            if len(attempt.screen_state['elements']) > 5:
-                                summary.append("    ... and more elements")
+                        summary.append("  Screen State:")
+                        summary.append(f"    {attempt.get_screen_summary()}")
+                else:
+                    summary.append("\nNo execution attempts recorded")
                 
-                summary.append("\n" + "-"*50 + "\n")  # Section separator
-        
-        # Add final status
-        summary.append("Final Status:")
+                summary.append("-" * 40)
+    
+        summary.append("\nFinal Status")
+        summary.append("=" * 50)
         summary.append(f"Current plan version: {len(self.plan_versions)}")
         summary.append(f"Current step: {self.current_step + 1}")
         summary.append(f"Current phase: {self.current_phase}")

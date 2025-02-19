@@ -22,7 +22,7 @@ class VisionController:
     def __init__(self, vnc_controller:  VNCController, 
                 model: Model,
                 vision_provider_elements: VisionLLMBase, 
-                vision_provider_coords: VisionLLMBase = None,
+                vision_provider_coords: Optional[VisionLLMBase] = None,
                 fps: float = 1.0, 
                 stability_threshold: float = 0.98, 
                 change_threshold: float = 0.98):
@@ -30,7 +30,7 @@ class VisionController:
         self.vnc = vnc_controller
         self.frame_interval = 1.0 / fps
         self.stability_threshold = stability_threshold
-        self.min_stable_frames = 5
+        self.min_stable_frames = 3
         self.stable_frame_count = 0
         self.last_frame = None
         self.last_resolution: Optional[Tuple[int, int]] = None
@@ -54,7 +54,11 @@ class VisionController:
         gray2 = np.array(frame2.convert('L'))
         
         # Calculate SSIM with frames at their current resolution
-        score = ssim(gray1, gray2, data_range=255)
+        result = ssim(gray1, gray2, data_range=255, full=True)
+        if isinstance(result, tuple):
+            score = result[0]
+        else:
+            score = result
         return score
     
     def has_significant_change(self, current_frame: Image.Image) -> bool:

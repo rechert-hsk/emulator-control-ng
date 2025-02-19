@@ -88,6 +88,43 @@ class QwenVision(VisionLLMBase):
                 time.sleep(1)
         raise ValueError(f"Failed to detect bounding box for {element} after 10 attempts")
 
+
+    def get_click_coordinates_by_description(self, element_decription: str) -> Dict[str, int]:
+        prompt = f"""
+        Return bounding boxes as a JSON array with labels. Never return masks or code fencing. Only return the bounding box as 'bbox_2d'. 
+        Focus a single requested UI element and its position. Make sure to cover the entire element in the bounding box.
+        Detect the 2d bounding box for: {element_decription}"""
+
+        attempts = 0
+        while attempts < 10:
+            try:
+                response = self.model.generate_content(prompt, self.img)
+                result = self.parse_json(response)
+                if not result or len(result) == 0:
+                    raise ValueError(f"Failed to detect bounding box for {element_decription}")
+                bbox = result[0]
+
+                bounding_box = self._get_bounding_box(bbox)
+                
+
+                abs_x1 = bounding_box["x1"]
+                abs_y1 = bounding_box["y1"]
+                abs_x2 = bounding_box["x2"]
+                abs_y2 = bounding_box["y2"]                      
+
+                center_x = (abs_x1 + abs_x2) // 2
+                center_y = (abs_y1 + abs_y2) // 2
+            
+                coords =  {"x": center_x, "y" : center_y}
+                return coords
+
+            except Exception as e:
+                attempts += 1
+                print(f"Attempt {attempts} failed: {e}")
+                time.sleep(1)
+        raise ValueError(f"Failed to detect bounding box for {element_decription} after 10 attempts")
+
+
     def get_click_coordinates(self, element: UIElement) -> Dict[str, int]:
         print(f"Getting click coordinates for {element}")
         if not self.override_cache:

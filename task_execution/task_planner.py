@@ -26,8 +26,13 @@ class TaskPlanner:
               2. A step leads to an unknown state, requiring replanning
             - Never leave a plan in an intermediate state"""
 
-    def create_execution_plan(self, task_description: str, screen: ScreenAnalysis) -> ExecutionPlan:
+    def create_execution_plan(self, task_description: str, screen: ScreenAnalysis, current_context: Optional[TaskContext] = None) -> ExecutionPlan:
         """Create high-level execution plan based on task and current screen"""
+        execution_context = ""
+        if current_context:
+            step_histories = current_context.get_current_step_history(include_mapped=True)
+            execution_context = self._build_execution_context(step_histories)
+
         prompt = f"""
         Task Goal:
         {task_description}
@@ -37,67 +42,101 @@ class TaskPlanner:
         - Screen Type: {screen.environment.interface_type.name if screen.environment else 'Unknown'}
         - Text Content: {screen.text_analysis if hasattr(screen, 'text_analysis') else 'None'}
 
-        Create a precise execution plan that:
-        1. Starts with ONLY the currently visible elements and state
-        2. Plans each step based on confirmed visible elements
-        3. Avoids assumptions about future states unless explicitly predictable
-        4. Requires replanning when entering unknown states
+        Previous Execution History:
+        {execution_context}
 
-        Rules for Step Planning:
-        - Each step must be based on currently visible/confirmed UI elements
-        - Only include actions that can be performed with visible elements
-        - When an action leads to an unknown state, stop and require replanning
-        - Do not assume the presence of elements that aren't confirmed visible
-        - For navigation, plan only one screen transition at a time
+        Create a precise execution plan that:
+        1. Considers historical progress:
+        - Don't repeat steps marked as completed unless state changed
+        - Learn from failed attempts and try alternative approaches
+        - Use previously successful strategies when applicable
+        - Skip steps that became irrelevant
+
+        2. Maintains execution continuity:
+        - Preserve working steps from previous plans when possible
+        - Keep correct dependency ordering (completed -> incomplete)
+        - Only generate new steps when necessary
+        - Document why steps were kept or changed
+
+        3. Verifies current state:
+        - Confirm if state matches expectations
+        - Plan recovery if state diverged
+        - Document state assumptions
+        - Include error handling steps
 
         Format response as JSON:
         {{
             "initial_state": {{
-                "description": "Detailed description of current visible elements and state",
+                "description": "Detailed state including historical context",
                 "key_elements": ["list", "of", "currently", "visible", "elements"]
             }},
             "steps": [
                 {{
-                    "description": "Specific action to take with visible elements",
+                    "description": "Specific action to take",
                     "precondition": {{
-                        "description": "What must be visible/true before this step",
-                        "key_elements": ["required", "visible", "elements"]
+                        "description": "What must be true before step",
+                        "key_elements": ["required", "elements"]
                     }},
                     "expected_outcome": {{
-                        "description": "What should be immediately observable after",
-                        "key_elements": ["expected", "visible", "elements"]
-                    }} or null if outcome unknown
+                        "description": "What should be true after",
+                        "key_elements": ["expected", "elements"]
+                    }} or null if unknown
                 }}
             ],
-            "is_complete": false if unknown outcome, true if goal achieved
+            "is_complete": boolean,
+            "planning_notes": "Analysis of plan changes and continuity",
+            "context_analysis": {{
+                "state_matches_expected": boolean,
+                "divergence_details": "String if state differs",
+                "reused_steps": ["list of steps reused from previous plan"],
+                "modified_steps": ["list of steps that were modified"],
+                "new_steps": ["list of completely new steps"]
+            }}
         }}
 
         Important:
-        - Only include UI elements that are currently visible in initial_state
-        - Plan steps only based on confirmed visible elements
-        - Set expected_outcome to null when next state is unpredictable
-        - Set is_complete=false when plan needs replanning
-        - Each step must be immediately actionable based on visible elements
+        - Only include UI elements that are currently visible
+        - Document any state divergence that requires recovery
+        - Explain why steps were kept, modified, or added
+        - Set is_complete=false if more planning needed
         """
-
 
         try:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
             plan_data = Model.parse_json(response)
             
+            # Extract only the fields needed for PlanCondition
+            initial_state_data = {
+                'description': plan_data['initial_state']['description'],
+                'key_elements': plan_data['initial_state']['key_elements']
+            }
+            
+            # Create plan steps from response
             steps = []
             for step in plan_data['steps']:
+                # Extract only the fields needed for PlanCondition
+                precondition_data = {
+                    'description': step['precondition']['description'],
+                    'key_elements': step['precondition']['key_elements']
+                }
+                
+                expected_outcome_data = None
+                if step.get('expected_outcome'):
+                    expected_outcome_data = {
+                        'description': step['expected_outcome']['description'],
+                        'key_elements': step['expected_outcome']['key_elements']
+                    }
+                
                 steps.append(PlanStep(
                     description=step['description'],
-                    precondition=PlanCondition(**step['precondition']),
-                    expected_outcome=PlanCondition(**step['expected_outcome']) if step.get('expected_outcome') else None
+                    precondition=PlanCondition(**precondition_data),
+                    expected_outcome=PlanCondition(**expected_outcome_data) if expected_outcome_data else None
                 ))
 
             # Validate plan termination
             if steps:
                 last_step = steps[-1]
                 if not last_step.expected_outcome and not plan_data.get('is_complete', False):
-                    # Add explicit replan step when ending in unknown state
                     steps.append(PlanStep(
                         description="Analyze new system state and replan next steps",
                         precondition=PlanCondition(
@@ -109,14 +148,14 @@ class TaskPlanner:
                 
             return ExecutionPlan(
                 steps=steps,
-                initial_state=PlanCondition(**plan_data['initial_state']),
+                initial_state=PlanCondition(**initial_state_data),
                 is_complete=plan_data.get('is_complete', False)
             )
 
         except Exception as e:
             print(f"Failed to create execution plan: {str(e)}")
-            raise Exception("Failed to create execution plan")
-        
+            raise Exception("Failed to create execution plan")        
+
     def evaluate_progress(self, 
                      current_context: TaskContext, 
                      screen: ScreenAnalysis, 
@@ -190,6 +229,7 @@ class TaskPlanner:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
             evaluation = Model.parse_json(response)
 
+            forced_replan = False
             # Record attempt if we have a previous step plan
             if previous_step_plan:
                 attempt = StepAttempt(
@@ -205,32 +245,36 @@ class TaskPlanner:
                 
                 current_context.record_attempt(
                     step_index=current_context.current_step,
-                    attempt=attempt  # Pass the complete StepAttempt object
+                    attempt=attempt  
                 )
 
+                print(attempt)
 
             # First check if overall task is complete
             if evaluation.get("task_goal_achieved", False):
-                if current_context.current_plan.is_complete:  # Fixed this line
+                if current_context.current_plan.is_complete:  
                     return True
 
             # Handle step progress
             if evaluation["step_completed"]:
                 if evaluation["next_action"] == "proceed":
-                    if current_context.current_step < len(current_context.current_plan.steps) - 1:  # Fixed this line
-                        print(f"Step {current_context.current_step + 1} completed successfully")
+                    print(f"Step {current_context.current_step + 1} completed successfully")
+                    if current_context.current_step < len(current_context.current_plan.steps) - 1:  
                         current_context.current_step += 1
-                    return False
+                    else:
+                        print("Plan ended and we do not have reached the task goal")
+                        print("Rreplanning is required")
+                        forced_replan = True
                     
-            if evaluation["next_action"] == "replan":
+            if evaluation["next_action"] == "replan" or forced_replan:
                 print("Replanning required")
                 print(f"Reason: {evaluation.get('failure_analysis', 'No analysis provided')}")
                 print("new plan")
-                new_plan = self.create_execution_plan(current_context.user_task, screen)
+                new_plan = self.create_execution_plan(current_context.user_task, screen, current_context)
                 new_plan.print_plan()
                 
                 # Try to map steps from old plan to new plan
-                step_mapping = self._map_plans(current_context.current_plan, new_plan)  # Fixed this line
+                step_mapping = self._map_plans(current_context.current_plan, new_plan)  
                 
                 current_context.add_new_plan(
                     new_plan=new_plan,
@@ -283,3 +327,86 @@ class TaskPlanner:
                     mapping[old_idx] = new_idx
                     break
         return mapping
+    
+
+    def _build_historical_context(self, context: TaskContext) -> str:
+        """Build detailed historical context from previous plans and attempts"""
+        if not context.plan_versions:
+            return "No historical context available"
+
+        history = []
+        history.append("=== Historical Execution Context ===\n")
+
+        # Track completed and failed steps across plans
+        completed_steps = set()
+        failed_steps = {}  # step description -> list of failure reasons
+        successful_strategies = {}  # step type -> successful approach
+
+        for version_idx, plan_version in enumerate(context.plan_versions):
+            history.append(f"\nPlan Version {version_idx + 1}")
+            
+            for step_idx, step in enumerate(plan_version.plan.steps):
+                step_key = f"{version_idx}:{step_idx}"
+                
+                if step_key in context.step_histories:
+                    step_history = context.step_histories[step_key]
+                    
+                    # Analyze attempts
+                    success_count = 0
+                    failure_reasons = []
+                    
+                    for attempt in step_history.attempts:
+                        if attempt.step_completed:
+                            success_count += 1
+                            if attempt.detailed_plan:
+                                # Record successful strategy
+                                step_type = self._categorize_step(step.description)
+                                successful_strategies[step_type] = attempt.detailed_plan
+                        else:
+                            if attempt.failure_details:
+                                failure_reasons.append(attempt.failure_details)
+
+                    if success_count > 0:
+                        completed_steps.add(step.description)
+                        history.append(f"✓ Step {step_idx + 1}: {step.description}")
+                        history.append(f"  Completed after {len(step_history.attempts)} attempts")
+                    else:
+                        failed_steps[step.description] = failure_reasons
+                        history.append(f"✗ Step {step_idx + 1}: {step.description}")
+                        history.append(f"  Failed {len(step_history.attempts)} times")
+                        if failure_reasons:
+                            history.append(f"  Failure reasons: {'; '.join(failure_reasons)}")
+
+        # Add analysis summary
+        history.append("\n=== Historical Analysis ===")
+        history.append(f"\nCompleted Steps: {len(completed_steps)}")
+        for step in completed_steps:
+            history.append(f"- {step}")
+        
+        history.append(f"\nFailed Steps: {len(failed_steps)}")
+        for step, reasons in failed_steps.items():
+            history.append(f"- {step}")
+            if reasons:
+                history.append(f"  Reasons: {'; '.join(reasons)}")
+
+        if successful_strategies:
+            history.append("\nSuccessful Strategies:")
+            for step_type, plan in successful_strategies.items():
+                history.append(f"- {step_type}: {plan.plan_description}")
+
+        return "\n".join(history)
+
+    def _categorize_step(self, step_description: str) -> str:
+        """Categorize step type for strategy matching"""
+        # Simple categorization based on keywords
+        step_lower = step_description.lower()
+        if "click" in step_lower:
+            return "button_interaction"
+        elif "type" in step_lower or "enter" in step_lower:
+            return "text_input"
+        elif "select" in step_lower:
+            return "selection"
+        elif "wait" in step_lower:
+            return "wait"
+        else:
+            return "other"

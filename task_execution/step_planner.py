@@ -90,11 +90,19 @@ class StepPlanner:
         
     def _create_step_prompt(self,
                           current_plan_step,
-                          screen_context: str,
+                          screen_context: str, 
                           vision_analysis: ScreenAnalysis,
                           step_histories: List[PlanStepHistory]) -> str:
         """Create the prompt for step generation"""
         history_context = self._format_step_history(step_histories) if step_histories else "No previous attempts"
+
+        mouse_actions = """
+        Mouse Click Actions:
+        - Simple click: "click" with button="left|right|middle"
+        - Double click: "click" with click_type="double" 
+        - Click and hold: "click" with hold=true
+        - Click and drag: "drag" with from_target and to_target
+        """
 
         return f"""
         You are a UI automation expert that converts high-level tasks into precise, atomic UI interactions.
@@ -106,11 +114,13 @@ class StepPlanner:
         - Required elements must be present: {', '.join(current_plan_step.precondition.key_elements)}
         - Expected outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
         - Must use only elements that are currently visible
-        - Must be exactly ONE specific interaction (click, type, press key, or select)
+        - Must be exactly ONE specific interaction (click, drag, type, press key, or select)
         
         CONTEXT:
         Interface: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
         
+        {mouse_actions}
+
         Available Elements:
         {screen_context}
         
@@ -124,9 +134,14 @@ class StepPlanner:
         4. Format response as JSON with this exact schema:
         {{
             "description": "Clear explanation of what will be done and why",
-            "action": "<click|type|press_key|select>",
+            "action": "<click|drag|type|press_key|select>",
             "target": "id_of_target_element",
             "context": {{
+                "button": "left|right|middle",
+                "click_type": "single|double",
+                "hold": true/false,
+                "from_target": "element_id for drag start",
+                "to_target": "element_id for drag end", 
                 "input_text": "text to type (for text inputs only)",
                 "input_format": "format requirements if any",
                 "append_enter": true/false,
@@ -136,7 +151,7 @@ class StepPlanner:
             }}
         }}
         """
-
+    
     def _format_step_history(self, histories: List[PlanStepHistory]) -> str:
         """Format step history for the prompt"""
         if not histories:
@@ -172,7 +187,7 @@ class StepPlanner:
         try:
             context_data = self._process_step_context(step_data)
             coordinates = self._get_step_coordinates(step_data, vision_analysis)
-
+            
             return DetailedStep(
                 description=step_data.get('description') or "",
                 action=step_data.get('action') or "",
@@ -222,8 +237,34 @@ class StepPlanner:
             context_data = step_data.get('context')
             if context_data is None:
                 raise ValueError("Missing required 'context' field in step data")
+
+            if step_data.get('action') == 'click':
+                # Set defaults for click action
+                context_data.setdefault('button', 'left')
+                context_data.setdefault('click_type', 'single') 
+                context_data.setdefault('hold', False)
+
+                # Validate button value
+                valid_buttons = ['left', 'right', 'middle']
+                if context_data['button'] not in valid_buttons:
+                    raise ValueError(f"Invalid button value: {context_data['button']}. Must be one of {valid_buttons}")
+
+                # Validate click_type value 
+                valid_click_types = ['single', 'double']
+                if context_data['click_type'] not in valid_click_types:
+                    raise ValueError(f"Invalid click_type: {context_data['click_type']}. Must be one of {valid_click_types}")
+
+            elif step_data.get('action') == 'drag':
+                required_fields = ['from_target', 'to_target']
+                missing_fields = [f for f in required_fields if f not in context_data]
+
+                if missing_fields:
+                    raise ValueError(f"Drag context missing required fields: {missing_fields}")
                 
-            if step_data.get('action') == 'type':
+                # Set default button for drag
+                context_data.setdefault('button', 'left')
+                    
+            elif step_data.get('action') == 'type':
                 required_fields = ['input_text', 'input_format', 'append_enter', 'max_length', 'special_characters']
                 missing_fields = [f for f in required_fields if f not in context_data]
                 
@@ -238,8 +279,8 @@ class StepPlanner:
                     'special_characters': context_data.get('special_characters', []),
                     'additional_notes': context_data.get('additional_notes')
                 }
-                
-            return context_data.get('additional_notes')
+
+            return context_data
             
         except Exception as e:
             print(f"Failed to process step context: {str(e)}")
@@ -248,14 +289,10 @@ class StepPlanner:
     def _get_step_coordinates(self, step_data: dict, vision_analysis: ScreenAnalysis) -> Optional[tuple]:
         """Get coordinates for a step's target element if needed"""
         target = step_data.get('target')
-        print(f"Target: {target}")
-        print(f"Capabilities: {vision_analysis.capabilities}")  # Added for debugging
         if target and vision_analysis.capabilities and vision_analysis.capabilities.has_mouse:
             target_elem = self._find_ui_element(target, vision_analysis.elements)
             if target_elem:
-                print(f"Found target element: --> {target_elem}")
                 coordinates = vision_analysis.get_coordinates(target_elem, True)
-                print(f"Coordinates --> : {coordinates}")
                 if isinstance(coordinates, dict):
                     return tuple(coordinates.values())
                 return coordinates

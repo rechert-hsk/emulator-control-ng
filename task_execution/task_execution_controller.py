@@ -169,6 +169,7 @@ class TaskExecutionController:
         return self.current_context
     
 if __name__ == "__main__":
+    # set -gx PYTHONPATH $PYTHONPATH /Users/klaus/Library/CloudStorage/OneDrive-Persönlich/Coding/Emulation/emulator-control-ng
     from vision.vision_google import GoogleVision
     from vision.vision_qwen import QwenVision
     import json

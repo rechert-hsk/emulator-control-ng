@@ -58,8 +58,8 @@ class QwenVision(VisionLLMBase):
         return json_output
 
 
-    def detect_bounding_box(self, element: UIElement) -> bool:
-        print(f"Detecting bounding box for {element}")
+    def detect_bounding_box(self, element: UIElement) -> Dict[str, int]:
+        # print(f"Detecting bounding box for {element}")
         if not self.override_cache:
             cached_results = self._get_cached_bounding_box(element.id)
             if cached_results:
@@ -78,6 +78,7 @@ class QwenVision(VisionLLMBase):
                 if not result or len(result) == 0:
                     raise ValueError(f"Failed to detect bounding box for {element}")
                 bbox = result[0]
+                print(f"Detected bounding box: {bbox} for {element}")
 
                 bounding_box = self._get_bounding_box(bbox)
                 self._cache_boundingbox(element.id, bounding_box)
@@ -126,7 +127,7 @@ class QwenVision(VisionLLMBase):
 
 
     def get_click_coordinates(self, element: UIElement) -> Dict[str, int]:
-        print(f"Getting click coordinates for {element}")
+        # print(f"Getting click coordinates for {element}")
         if not self.override_cache:
             cached_results = self._get_cached_coordinates(element.id)
             if cached_results:

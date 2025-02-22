@@ -52,6 +52,7 @@ class EventManager:
         """Execute a sequence of instructions"""
         
         instructions = plan.steps
+
         for instruction in instructions:
             retry_count = 0
             success = False
@@ -125,10 +126,29 @@ class EventManager:
 
     def _handle_dynamic_interaction(self, description: str, context: Dict) -> Generator[VNCEvent, None, None]:
         """Generate VNC events for complex interactions using LLM"""
+
+        # Extract click context information
+        click_info = {}
+        if context.get("action") == "click" and isinstance(context.get("context"), dict):
+            click_context = context["context"]
+            click_info = {
+                "button": click_context.get("button", "left"),
+                "click_type": click_context.get("click_type", "single"),
+                "hold": click_context.get("hold", False)
+            }
+
         prompt = f"""
 Translate this UI interaction into a sequence of primitive VNC events.
 INTERACTION: {description}
-CONTEXT: {json.dumps(context, indent=2)}
+
+CONTEXT: 
+{json.dumps(context, indent=2)}
+
+CLICK DETAILS (if applicable):
+Button: {click_info.get('button', 'left')} 
+Click Type: {click_info.get('click_type', 'single')}
+Hold: {click_info.get('hold', False)}
+
 REQUIREMENTS:
 1. Only use these primitive event types:
 - mousemove: Requires x,y coordinates
@@ -138,7 +158,14 @@ REQUIREMENTS:
 - keyup: Requires key value
 - delay: Requires duration in ms
 
-2. For keyboard events, only use these special keys:
+2. For click interactions:
+- Single click: mousedown + mouseup
+- Double click: mousedown + mouseup + delay(100ms) + mousedown + mouseup
+- Click and hold: mousedown only
+- Map buttons: "left"=1, "middle"=2, "right"=3
+- Always add delay between clicks (100ms minimum)
+
+3. For keyboard events, only use these special keys:
 - Single characters (a-z, 0-9, punctuation)
 - Special keys (must be exact match):
   * "return" or "enter" - For Enter/Return key
@@ -156,35 +183,41 @@ REQUIREMENTS:
   * "shift", "ctrl", "alt" - For modifier keys
   * "lshift", "rshift", "lctrl", "rctrl", "lalt", "ralt" - For specific modifier sides
 
-3. Include essential interaction components:
-- Position mouse before any clicks
+4. Include essential interaction components:
+- Position mouse before any clicks 
 - Press/release modifier keys properly
 - Add delays between actions (min 50ms)
 - Handle multi-step sequences in correct order
+- For double clicks ensure proper timing (100ms between clicks)
 
-4. IMPORTANT
+5. IMPORTANT
 - Carefully evaluate all information provided as context
+- Follow exact click patterns based on click_type
+- Respect button selection (left/middle/right)
+- Handle click and hold when specified
 
 RESPONSE FORMAT:
 Return a JSON array of events where each event has:
 {{
 "type": "<event_type>",
 "x": number, // For mouse events
-"y": number, // For mouse events
-"key": string, // For keyboard events (must match special keys list above)
+"y": number, // For mouse events 
+"button": number, // For mouse events (1=left, 2=middle, 3=right)
+"key": string, // For keyboard events
 "duration": number // For delays (in ms)
 }}
 
-Example:
+Example for double right click:
 [
-{{"type": "keydown", "key": "shift"}},
-{{"type": "keydown", "key": "a"}},
-{{"type": "keyup", "key": "a"}},
-{{"type": "keyup", "key": "shift"}},
-{{"type": "delay", "duration": 50}},
-{{"type": "mousemove", "x": 100, "y": 200}}
+{{"type": "mousemove", "x": 100, "y": 200}},
+{{"type": "mousedown", "button": 3}},
+{{"type": "mouseup", "button": 3}},
+{{"type": "delay", "duration": 100}},
+{{"type": "mousedown", "button": 3}},
+{{"type": "mouseup", "button": 3}}
 ]
 """
+
         
         response = self.translator_model.complete(prompt, self.system_prompt)
         events_data = Model.parse_json(response)
@@ -211,23 +244,37 @@ Example:
         required_fields = {
             "mousemove": ["x", "y"],
             "mousedown": ["button"],
-            "mouseup": ["button"],
+            "mouseup": ["button"], 
             "keydown": ["key"],
             "keyup": ["key"],
             "delay": ["duration"]
         }
+
+        # Convert string button names to numbers
+        button_map = {
+            "left": 1,
+            "middle": 2, 
+            "right": 3
+        }
         
         event_logger.debug(f"Validating event data: {event_data}")
         event_type = event_data.get("type")
+
         if event_type not in required_fields:
-            event_logger.error(f"Invalid event type: {event_type}") 
+            event_logger.error(f"Invalid event type: {event_type}")
             return None
-            
+
+        # Convert button name to number if needed
+        if event_type in ["mousedown", "mouseup"]:
+            button = event_data.get("button")
+            if isinstance(button, str):
+                event_data["button"] = button_map.get(button.lower())
+                
         for field in required_fields[event_type]:
             if field not in event_data:
                 event_logger.error(f"Missing required field '{field}' for event type '{event_type}'")
                 return None
-                
+
         return VNCEvent(**event_data)
 
     

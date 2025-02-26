@@ -115,25 +115,32 @@ class StepPlanner:
         - Expected outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
         - Must use only elements that are currently visible
         - Must be exactly ONE specific interaction (click, drag, type, press key, or select)
-        
+
         CONTEXT:
         Interface: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
-        
+
         {mouse_actions}
 
         Available Elements:
         {screen_context}
-        
+
         Previous Attempts:
         {history_context}
 
-        INSTRUCTIONS:
-        1. Analyze the available elements and required outcome
-        2. If previous attempts failed, choose a different approach
+        CRITICAL ANALYSIS INSTRUCTIONS:
+        1. FIRST carefully analyze the screenshot to understand the current UI state
+        2. Identify which UI elements are active, disabled, or in a specific state (selected, hovered, etc.)
+        3. Consider the visual context - what phase of the process is shown, what options are available
+        4. Determine if required elements from previous failed attempts are now visible or accessible
+        5. Check if any new UI elements have appeared that might be relevant
+
+        PLANNING INSTRUCTIONS:
+        1. Based on your analysis of the current screenshot state, identify the most appropriate action
+        2. If previous attempts failed, choose a different approach based on what's currently visible
         3. Generate a single, specific interaction that moves towards the goal
         4. Format response as JSON with this exact schema:
         {{
-            "description": "Clear explanation of what will be done and why",
+            "description": "Clear explanation of what will be done and why based on current UI state",
             "action": "<click|drag|type|press_key|select>",
             "target": "id_of_target_element",
             "context": {{

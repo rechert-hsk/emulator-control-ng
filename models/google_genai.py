@@ -18,7 +18,8 @@ class GoogleModel(Model):
     def generate_content(self, 
                         prompt: str, 
                         images: Union[Image.Image, List[Image.Image]], 
-                        schema: Optional[str] = None) -> str:
+                        schema: Optional[str] = None,
+                        system_prompt: Optional[str] = None) -> str:
         
         if not isinstance(images, list):
             images = [images]
@@ -45,5 +46,5 @@ class GoogleModel(Model):
                 print(f"Error processing frame: {e}")
                 import time
                 time.sleep(5)
-        return None
+        raise ValueError("Failed to process frame after 10 attempts")
 

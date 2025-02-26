@@ -14,11 +14,12 @@ class QwenVision(VisionLLMBase):
         self.model = OpenRouter(apikey, model_name="qwen2.5-vl-72b-instruct", base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
         self.override_cache = True
         
-    def add_screen(self, image_path: str, override_cache: bool = False):
+    def add_screen(self, image_path: Image.Image, override_cache: bool = False):
         super().add_screen(image_path, override_cache)
         self._prepare_image()
 
     def _prepare_image(self):
+        assert self.image is not None, "Image not set"
         self.img = self.image.copy()
         original_width, original_height = self.img.size
         
@@ -39,7 +40,7 @@ class QwenVision(VisionLLMBase):
         return {"y1": abs_y1, "x1": abs_x1, "y2": abs_y2, "x2": abs_x2}
 
     def detect_ui_elements(self) -> List[Dict]:
-        return None
+        return []
 
     @staticmethod
     def parse_json(json_output):
@@ -133,8 +134,7 @@ class QwenVision(VisionLLMBase):
             if cached_results:
                 return cached_results
         
-        if element.bounding_box == None:
-            element.bounding_box = self.detect_bounding_box(element)
+        element.bounding_box = self.detect_bounding_box(element)
         return super().get_click_coordinates(element)
 
         

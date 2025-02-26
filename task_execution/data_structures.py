@@ -135,6 +135,28 @@ class StepPlan:
     plan_description: str 
     expected_outcome: str
 
+    def print_plan(self):
+        """Print the step plan in a human-readable format"""
+        print("\n=== Step Plan ===")
+        print(f"Description: {self.plan_description}")
+        print(f"Expected Outcome: {self.expected_outcome}")
+        print("\nDetailed Steps:")
+        for i, step in enumerate(self.steps, 1):
+            print(f"\nStep {i}:")
+            if step.description:
+                print(f"Description: {step.description}")
+            print(f"Action: {step.action}")
+            if step.target:
+                print(f"Target: {step.target}")
+            if step.coordinates:
+                print(f"Coordinates: {step.coordinates}")
+            if step.wait_time:
+                print(f"Wait Time: {step.wait_time}s")
+            if step.success_condition:
+                print(f"Success Condition: {step.success_condition}")
+            if step.expected_result:
+                print(f"Expected Result: {step.expected_result}")
+
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import json

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Set
 import json
 from pathlib import Path
@@ -9,7 +9,9 @@ from models.api import Model
 import datetime
 import json
 from pathlib import Path
-
+from fuzzywuzzy import fuzz # type: ignore
+import torch
+from lib.OmniParser.omni_utils import *
 
 class InterfaceType(Enum):
     TERMINAL = auto()
@@ -38,7 +40,7 @@ class InteractionCapabilities:
     has_touch: bool = False
     supports_text_selection: bool = False
     supports_clipboard: bool = False
-    input_methods: Set[str] = None
+    input_methods: Set[str] = field(default_factory=set)
 
 @dataclass
 class TextScreenInteraction:
@@ -54,6 +56,11 @@ class TextScreenAnalysis:
 
 
 class ScreenAnalysis:
+
+    BOX_TRESHOLD=0.01
+    model_path = "lib/OmniParser/weights/icon_detect/model.pt"
+    som_model = get_yolo_model(model_path)
+
     SYSTEM_PROMPT = """You are an expert in analyzing computer interfaces and operating systems.
 Your task is to examine the provided screenshot and identify:
 1. The operating system and its characteristics
@@ -156,6 +163,10 @@ IMPORTANT:
         self.model = model
         self.text_analysis: Optional[TextScreenAnalysis] = None
         self._is_text_analyzed = False
+        self.ocr_bbox = None
+        self.ocr_text = None
+        self.ocr_bbox_elem = None
+        self.filtered_boxes_elem = None
         
         # Environment analysis
         self.environment: Optional[SoftwareEnvironment] = None
@@ -172,17 +183,63 @@ IMPORTANT:
         self._is_environment_detected = False
         self._is_elements_detected = False
         self._is_coordinates_added = False
+        self._is_yolo_ocr_processed = False
 
     def ensure_screen_added(self) -> 'ScreenAnalysis':
         if self.debug_mode:
             raise RuntimeError("Cannot add screen in debug mode")
 
         """Lazily add screen to providers"""
+        assert self.provider is not None, "Vision provider not found"
+        assert self.provider_coords is not None, "Vision provider for coordinates not found"
+        assert self.image is not None, "No screenshot available for analysis"
+
         if not self._is_screen_added:
             self.provider.add_screen(self.image)
             self.provider_coords.add_screen(self.image)
             self._is_screen_added = True
+            self._prepprocess_image()
+
         return self
+
+    def _prepprocess_image(self):
+
+        if self._is_yolo_ocr_processed:
+            return
+
+        assert self.image is not None, "Image not found"
+
+        w, h = self.image.size
+        imgsz = (h, w)
+        xyxy, logits, phrases = predict_yolo(model=self.som_model, image=self.image, box_threshold=self.BOX_TRESHOLD, imgsz=imgsz, scale_img=False, iou_threshold=0.1)
+        # xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
+        phrases = [str(i) for i in range(len(phrases))]
+
+        ocr_bbox_rslt, is_goal_filtered = check_ocr_box(self.image, display_img = False, output_bb_format='xyxy', goal_filtering=None)
+        self.ocr_text, self.ocr_bbox = ocr_bbox_rslt
+        self.ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(self.ocr_bbox, self.ocr_text) if int_box_area(box, w, h) > 0] 
+
+        iou_threshold=0.9
+        xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
+        
+        #print(" x" * 80)
+        # print(" >> len yolo", len(xyxy))
+        # print(" >< len ocr", len(self.ocr_bbox))
+        # print("combined", len(xyxy_elem))
+        # print(" x" * 80)
+        filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=self.ocr_bbox_elem)
+
+        # sort the filtered_boxes so that the one with 'content': None is at the end, and get the index of the first 'content': None
+        self.filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
+        # print("filtered_boxes_elem", self.filtered_boxes_elem)
+
+        self._is_yolo_ocr_processed = True
+
+        # print(self.filtered_boxes_elem)
+        # get the index of the first 'content': None
+        # starting_idx = next((i for i, box in enumerate(self.filtered_boxes_elem) if box['content'] is None), -1)
+        # self.filtered_boxes = torch.tensor([box['bbox'] for box in self.filtered_boxes_elem])
+        
 
     def analyze_text_screen(self) -> 'ScreenAnalysis':
         """Perform OCR and LLM analysis for all interface types"""
@@ -193,6 +250,9 @@ IMPORTANT:
             if self.debug_mode:
                 raise RuntimeError("Cannot analyze text screen in debug mode")
         
+            assert self.image is not None, "No screenshot available for analysis"
+            assert self.environment is not None, "Environment not detected"
+            assert self.model is not None, "Model not found"
             try:
                 img = self.image
                 if self.environment.interface_type in [InterfaceType.TERMINAL, InterfaceType.TEXT_UI]:
@@ -256,6 +316,9 @@ IMPORTANT:
             raise RuntimeError("Cannot detect environment in debug mode")
 
         self.ensure_screen_added()
+
+        assert self.model is not None, "Model not found"
+        assert self.image is not None, "No screenshot available for analysis"
         img = self.image
         if not self._is_environment_detected:
             llm_analysis = self.model.generate_content(
@@ -298,19 +361,24 @@ IMPORTANT:
         
         return self
     
-  
     def detect_elements(self) -> 'ScreenAnalysis':
         """Lazily detect UI elements based on environment analysis"""
         
+        self.ensure_screen_added()
         self.detect_environment()
         
         if not self._is_elements_detected:
             if self.debug_mode:
                 raise RuntimeError("Cannot detect elements in debug mode")
         
+            self.analyze_text_screen()
+            assert self.provider is not None, "Vision provider not found"   
+            assert self.environment is not None, "Environment not detected"
+            assert self.capabilities is not None, "Capabilities not detected"
+            assert self.required_analysis is not None, "Required analysis not detected"
             if self.environment.interface_type in [InterfaceType.TERMINAL, InterfaceType.TEXT_UI]:
                 # For text-based interfaces, analyze text first
-                self.analyze_text_screen()
+                
                 # Convert text interactions to UI elements
                 self._elements_data = []
                 if self.text_analysis:
@@ -342,9 +410,72 @@ IMPORTANT:
                 self._elements_data = []
                 
             self.ui_elements = [UIElement.from_dict(elem) for elem in self._elements_data]
-            self._is_elements_detected = True
-        
+           
+            assert self.filtered_boxes_elem is not None, "No filtered boxes found"
+            # Filter box detection results
+            box_elements = [elem for elem in self.filtered_boxes_elem
+                        if elem['source'] in ['box_ocr_content_ocr', 'box_yolo_content_ocr']]
+            
+            # Process each box element
+            for box in box_elements:
+                matched = False
+                bbox = box['bbox']
+                
+                # Convert bbox to standardized dict format
+                bbox_dict = {
+                    "y1": bbox[1] if isinstance(bbox, tuple) else bbox[1], 
+                    "x1": bbox[0] if isinstance(bbox, tuple) else bbox[0],
+                    "y2": bbox[3] if isinstance(bbox, tuple) else bbox[3], 
+                    "x2": bbox[2] if isinstance(bbox, tuple) else bbox[2]
+                }
+                
+                # Try to match with existing elements using fuzzy matching
+                if box.get('content'):
+                    best_match_score = 0
+                    best_match_element = None
+                    
+                    for element in self.ui_elements:
+                        if not element.text:
+                            continue
+                            
+                        # Calculate fuzzy match ratio
+                        ratio = fuzz.ratio(box['content'].lower(), element.text.lower())
+                        
+                        # Also check partial token matches for longer strings
+                        token_ratio = fuzz.partial_token_sort_ratio(box['content'].lower(), element.text.lower())
+                        
+                        # Use the higher of the two scores
+                        match_score = max(ratio, token_ratio)
+                        if match_score > best_match_score and match_score > 70:  # 70% threshold
+                            best_match_score = match_score
+                            best_match_element = element
+                    
+                    if best_match_element:
+                        best_match_element.bounding_box = bbox_dict
+                        matched = True
+                
+                # Add new element if no match found
+                if not matched:
+                    element_type = "button" if box['interactivity'] else "text"
+                    context = "Boot screen interface"
+                    
+                    new_element = {
+                        "element_id": f"{box['content'].lower().replace(' ', '_') if box['content'] else 'icon'}_{len(self.ui_elements)}",
+                        "element_type": element_type,
+                        "element_text": box['content'] or "",
+                        "context": context,
+                        "visual_description": f"{element_type.capitalize()} containing '{box['content']}'" if box['content'] else "Icon element",
+                        "importance": "high" if box['interactivity'] else "medium",
+                        "bounding_box": bbox_dict
+                    }
+                    
+                    self.ui_elements.append(UIElement.from_dict(new_element))
+            
+            # print(f"Detected UI elements: {self.ui_elements}")
+
+            self._is_elements_detected = True            
         return self
+
     
     @property
     def text_screen_info(self) -> Optional[TextScreenAnalysis]:
@@ -361,24 +492,47 @@ IMPORTANT:
         self._is_text_analyzed = True
 
     def get_coordinates_by_description(self, description: str, update: bool = False) -> dict:
+        assert self.provider_coords is not None, "Vision provider for coordinates not found"
         return self.provider_coords.get_click_coordinates_by_description(description)
+
+    def _find_yolo_ocr_coordinates(self, elem: UIElement) -> Optional[dict]:
+        """Find coordinates from YOLO and OCR results"""
+        if self.ocr_bbox_elem and elem.text:
+            print(f"Detecting bounding box for {elem.text}")
+            for ocr_elem in self.ocr_bbox_elem:
+                if ocr_elem['content'] == elem.text:
+                    # Convert from xyxy format to the required dict format
+                    bbox = ocr_elem['bbox']
+                    abs_x1 = bbox[0]
+                    abs_y1 = bbox[1]
+                    abs_x2 = bbox[2]
+                    abs_y2 = bbox[3]                      
+
+                    center_x = (abs_x1 + abs_x2) // 2
+                    center_y = (abs_y1 + abs_y2) // 2
+    
+                    coords =  {"x": center_x, "y" : center_y}    
+                    return coords
+        return None
 
     def get_coordinates(self, elem: UIElement, update: bool = False) -> dict:
         """Lazily add click coordinates if needed"""
 
         if self.debug_mode:
             return { "x" : "0", "y" : "0" } 
-            
         self.detect_elements()
 
         print(f"Getting coordinates for {elem}")
-
-        if not update and elem.click_coordinates is not None:
-            return elem.click_coordinates
-
+        result = self._find_yolo_ocr_coordinates(elem)
+        if result:
+            return result
+        assert self.capabilities is not None, "Capabilities not detected"
+        assert self.provider_coords is not None, "Vision provider for coordinates not found"
         if self.capabilities.has_mouse:
             coords = self.provider_coords.get_click_coordinates(elem)
             elem.click_coordinates = coords
+        else:
+            raise ValueError("Mouse input not supported")
 
         return elem.click_coordinates
     
@@ -413,10 +567,12 @@ IMPORTANT:
     @elements.setter
     def elements(self, value: List[UIElement]):
         """Set the detected UI elements"""
-        self.ui_elements = [UIElement.from_dict(elem) for elem in value]
+        if not value:
+            return
+        self.ui_elements = value
         self._is_elements_detected = True
 
-    
+
     @property
     def analysis_strategy(self) -> dict:
         """Get the recommended analysis strategy"""
@@ -458,10 +614,19 @@ IMPORTANT:
         self._analysis_confidence = value["confidence"]
         self._is_environment_detected = True
 
-    
+    @property
+    def orc_text(self) -> Optional[str]:
+        """Get OCR text if available"""
+        if not self.ocr_text:
+            self._prepprocess_image()
+        result_text = " ".join(self.ocr_text) if self.ocr_text else ""
+        return result_text
+
     def save_debug_info(self, plan) -> Path:
         """Save debug information to a timestamped directory."""
         # Create base debug directory
+        assert self.image is not None, "No screenshot available for debug"
+        
         debug_dir = Path("vision-debug")
         debug_dir.mkdir(exist_ok=True)
         

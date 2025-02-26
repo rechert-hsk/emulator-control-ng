@@ -28,7 +28,9 @@ def retry_with_backoff(retries=5, initial_delay=1):
                         delay *= 2  # exponential backoff
                         
             logger.error(f"All {retries} attempts failed. Last error: {str(last_exception)}")
-            raise last_exception
+            if last_exception is not None:
+                raise last_exception
+            raise RuntimeError("All retry attempts failed without specific error")
             
         return wrapper
     return decorator
@@ -64,6 +66,7 @@ class Model(ABC):
     def generate_content(self, 
                         prompt: str, 
                         images: Union[Image.Image, List[Image.Image]], 
-                        schema: Optional[str] = None) -> str:
+                        schema: Optional[str] = None, 
+                        system_prompt: Optional[str] = None) -> str:
         """Generate content based on prompt and images"""
         pass

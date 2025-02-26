@@ -6,6 +6,10 @@ from pathlib import Path
 from vision.vision_cache import VisionCache, CacheType
 import os
 from PIL import Image
+import torch
+from lib.OmniParser.omni_utils import *
+from PIL import Image
+
 
 @dataclass
 class UIElement:
@@ -43,22 +47,24 @@ class UIElement:
 class VisionLLMBase(ABC):
     """Base class for LLM vision providers"""
 
+    BOX_TRESHOLD=0.01
+    model_path = "lib/OmniParser/weights/icon_detect/model.pt"
+    som_model = get_yolo_model(model_path)
+
     def __init__(self):
         self.cache = VisionCache()
         self.image = None
         self.override_cache = False
-    
+        
     @abstractmethod
     def add_screen(self, image: Image.Image, override_cache: bool = False):
-        self.image = image
+        self.image = image.convert("RGB") 
         self.override_cache = override_cache
-        pass
 
     @abstractmethod
     def detect_ui_elements(self) -> List[Dict]:
         """Detect UI elements in the image"""
         pass
-    
 
     @abstractmethod
     def get_click_coordinates_by_description(self, description: str) -> Dict[str, int]:

@@ -46,7 +46,7 @@ class VisionController:
         else:
             self.provider_coords = vision_provider_coords
 
-
+    
     def calculate_frame_similarity(self, frame1: Image.Image, frame2: Image.Image) -> float:
         """Calculate similarity between two frames using SSIM"""
         # Convert PIL Images to numpy arrays in grayscale

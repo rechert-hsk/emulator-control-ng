@@ -4,6 +4,8 @@ from models.api import Model
 from vision.vision_analysis import ScreenAnalysis
 from dataclasses import dataclass
 from task_execution.data_structures import PlanCondition, PlanStep, ExecutionPlan, PlanStepHistory, StepAttempt, TaskContext, StepPlan
+import traceback
+import json
 
 class TaskPlanner:
     """Creates high-level execution plans based on task goals and UI state"""
@@ -40,7 +42,7 @@ class TaskPlanner:
         Current Screen Analysis:
         - Visible Elements: {screen.elements}
         - Screen Type: {screen.environment.interface_type.name if screen.environment else 'Unknown'}
-        - Text Content: {screen.text_analysis if hasattr(screen, 'text_analysis') else 'None'}
+        - Text Content: {screen.ocr_text if hasattr(screen, 'ocr_text') else 'None'}
 
         Previous Execution History:
         {execution_context}
@@ -157,14 +159,20 @@ class TaskPlanner:
             raise Exception("Failed to create execution plan")        
 
     def evaluate_progress(self, 
-                     current_context: TaskContext, 
-                     screen: ScreenAnalysis, 
-                     previous_step_plan: Optional[StepPlan] = None,
-                     previous_step_plan_success: bool = False) -> bool:
+                 current_context: TaskContext, 
+                 screen: ScreenAnalysis, 
+                 previous_step_plan: Optional[StepPlan] = None,
+                 previous_step_plan_success: bool = False) -> bool:
         """
         Evaluate the current progress and determine next steps.
         Returns True if task is completed successfully, False otherwise.
         """
+        import json
+        import time
+        import traceback
+        import re
+        from typing import Optional
+        
         if current_context.current_plan is None:
             raise ValueError("Current plan is None")
         current_step = current_context.current_plan.steps[current_context.current_step]
@@ -172,62 +180,118 @@ class TaskPlanner:
 
         screen_state = {
             'elements': [str(elem) for elem in screen.elements],
-            'text_content': screen.text_analysis if hasattr(screen, 'text_content') else None,
+            'text_content': screen.ocr_text if hasattr(screen, 'ocr_text') else 'None',
             'interface_type': screen.environment.interface_type.name if screen.environment else 'Unknown',
+            'operating system': screen.environment.os if screen.environment else 'Unknown',
             'timestamp': time.time()
         }
         
-
         execution_context = self._build_execution_context(step_histories)
 
         prompt = f"""
-        You are a strict automated testing system evaluating task execution progress. Your evaluation must be precise and based on clear evidence.
+        You will evaluate whether a step in a multi-step task has been completed based on the current screen state.
+        Follow this structured workflow, answering each section in sequence:
 
-        TASK INFORMATION:
-        - Original Goal: {current_context.user_task}
-        - Current Step: {current_context.current_step + 1} of {len(current_context.current_plan.steps)}
-        - Step Description: {current_step.description}
+        ---TASK INFORMATION---
+        Original Goal: {current_context.user_task}
+        Current Step: #{current_context.current_step + 1} of {len(current_context.current_plan.steps)}
+        Step Description: {current_step.description}
         
-        EXPECTED OUTCOME:
-        - Description: {current_step.expected_outcome.description if current_step.expected_outcome else 'Unknown'}
-        - Required Elements: {', '.join(current_step.expected_outcome.key_elements) if current_step.expected_outcome else 'Unknown'}
+        Expected Outcome:
+        - Description: {current_step.expected_outcome.description if current_step.expected_outcome else 'Not specified'}
+        - Required Elements: {', '.join(current_step.expected_outcome.key_elements) if current_step.expected_outcome and current_step.expected_outcome.key_elements else 'Not specified'}
 
-        CURRENT STATE:
-        Visible Elements: {screen.elements}
+        Current Screen State:
+        - Visible Elements: {screen.elements}
+        - Interface Type: {screen.environment.interface_type.name if screen.environment else 'Unknown'}
 
+        Previous Execution History:
         {execution_context}
 
-        EVALUATION RULES:
-        1. Step Completion:
-           - Mark step_completed=true ONLY if ALL expected elements are present
-           - The mere ability to perform an action is NOT completion
-           - Visual confirmation of the expected outcome is required
+        ---WORKFLOW STEPS---
 
-        2. Screen State:
-           - Verify all required elements are visible and in the expected state
-           - Compare current elements against expected_outcome elements
+        STEP 1: STATE OBSERVATION
+        List the key elements currently visible on the screen:
+        
+        STEP 2: EXPECTED OUTCOME ANALYSIS
+        Break down the expected outcome into specific verifiable criteria:
+        
+        STEP 3: COMPARISON
+        For each expected criterion, indicate if it is met by the current state and provide evidence:
+        
+        STEP 4: GOAL STATE ASSESSMENT
+        Determine if the overall task goal has been achieved regardless of the specific step:
+        
+        STEP 5: DECISION
+        Based on your analysis:
+        - Is this step completed? (Yes/No)
+        - What should be the next action? (Proceed/Replan)
+        - Why? (Provide specific reasoning)
 
-        3. Task Goal:
-           - Only mark task_goal_achieved=true if final objective is verifiably complete
-           - Partial progress is not sufficient
-
-        REQUIRED RESPONSE FORMAT:
+        ---FINAL EVALUATION---
+        Provide your final evaluation in a valid JSON format exactly as shown below:
+        ```json
         {{
-            "step_completed": boolean,
-            "reasoning": "Detailed comparison of expected vs actual state",
+            "step_completed": true or false,
+            "reasoning": "Detailed explanation of your decision",
+            "success_criteria_met": ["List specific criteria that were met"],
+            "missing_criteria": ["List specific criteria that were not met"],
             "next_action": "proceed" or "replan",
-            "success_criteria_met": ["list each matched expected element"],
-            "missing_criteria": ["list expected elements not found"],
-            "task_goal_achieved": boolean,
-            "failure_analysis": "Required if step_completed=false: what's missing and why"
+            "task_goal_achieved": true or false
         }}
+        ```
 
-        CRITICAL: Your evaluation must be conservative - when in doubt, mark as incomplete.
+        IMPORTANT NOTES:
+        - Focus on whether the OUTCOME has been achieved, not the specific actions taken
+        - If the expected state is already present, the step should be marked as complete
+        - Some steps may be completed through alternative paths - focus on the result, not the method
+        - If the ultimate task goal is achieved, mark task_goal_achieved=true regardless of step completion
+        - Your response MUST include the properly formatted JSON block
         """
 
         try:
             response = self.planner_model.generate_content(prompt, screen.image, system_prompt=self.system_prompt)
-            evaluation = Model.parse_json(response)
+            response_text = response
+            
+            # Extract JSON using regex pattern matching for code blocks
+            json_pattern = r"```(?:json)?\s*({.*?})\s*```"
+            json_matches = re.findall(json_pattern, response_text, re.DOTALL)
+            
+            if json_matches:
+                json_str = json_matches[0]
+                try:
+                    evaluation = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try cleaning up the JSON string if it contains literal "true" or "false" without quotes
+                    cleaned_json = re.sub(r':\s*(true|false)\s*([,}])', r': \1\2', json_str)
+                    cleaned_json = cleaned_json.replace('true', 'true').replace('false', 'false')
+                    try:
+                        evaluation = json.loads(cleaned_json)
+                    except:
+                        # Last resort: extract a simpler evaluation
+                        print("Could not parse JSON response. Using fallback evaluation.")
+                        # Simple fallback extraction
+                        is_completed = "yes" in response_text.lower() and "step completed" in response_text.lower()
+                        evaluation = {
+                            "step_completed": is_completed,
+                            "reasoning": "Extracted from text response due to JSON parsing failure",
+                            "success_criteria_met": [],
+                            "missing_criteria": [],
+                            "next_action": "replan" if not is_completed else "proceed",
+                            "task_goal_achieved": False
+                        }
+            else:
+                # No JSON found, extract basic information
+                print("No JSON block found in response. Using fallback evaluation.")
+                is_completed = "yes" in response_text.lower() and "step completed" in response_text.lower()
+                evaluation = {
+                    "step_completed": is_completed,
+                    "reasoning": "Extracted from text response - no JSON block found",
+                    "success_criteria_met": [],
+                    "missing_criteria": [],
+                    "next_action": "replan" if not is_completed else "proceed",
+                    "task_goal_achieved": False
+                }
 
             forced_replan = False
             # Record attempt if we have a previous step plan
@@ -239,7 +303,7 @@ class TaskPlanner:
                     step_completed=evaluation["step_completed"],
                     evaluation_reasoning=evaluation["reasoning"],
                     screen_state=screen_state,
-                    failure_details=evaluation.get("failure_analysis") if not evaluation["step_completed"] else None,
+                    failure_details=evaluation.get("reasoning") if not evaluation["step_completed"] else None,
                     interaction_result=f"Success criteria met: {', '.join(evaluation.get('success_criteria_met', []))}"
                 )
                 
@@ -248,7 +312,7 @@ class TaskPlanner:
                     attempt=attempt  
                 )
 
-                print(attempt)
+                print(f"Evaluation result: {evaluation}")
 
             # First check if overall task is complete
             if evaluation.get("task_goal_achieved", False):
@@ -262,14 +326,14 @@ class TaskPlanner:
                     if current_context.current_step < len(current_context.current_plan.steps) - 1:  
                         current_context.current_step += 1
                     else:
-                        print("Plan ended and we do not have reached the task goal")
-                        print("Rreplanning is required")
+                        print("Plan ended but we have not reached the task goal")
+                        print("Replanning is required")
                         forced_replan = True
                     
             if evaluation["next_action"] == "replan" or forced_replan:
                 print("Replanning required")
-                print(f"Reason: {evaluation.get('failure_analysis', 'No analysis provided')}")
-                print("new plan")
+                print(f"Reason: {evaluation.get('reasoning', 'No analysis provided')}")
+                print("Creating new plan...")
                 new_plan = self.create_execution_plan(current_context.user_task, screen, current_context)
                 new_plan.print_plan()
                 
@@ -288,6 +352,8 @@ class TaskPlanner:
 
         except Exception as e:
             print(f"Failed to evaluate progress: {str(e)}")
+            traceback.print_exc()
+            # Provide a fallback response to avoid crashing the system
             return False
 
     def _build_execution_context(self, step_histories: List[PlanStepHistory]) -> str:

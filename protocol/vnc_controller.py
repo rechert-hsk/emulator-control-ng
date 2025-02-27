@@ -28,10 +28,10 @@ class VNCController():
     def mouse_move(self, target_x, target_y):
         self.client.mouseMove(int(target_x), int(target_y))
 
-    def mouse_down(self, button):
+    def mouse_down(self, button: int):
         self.client.mouseDown(button)
 
-    def mouse_up(self, button):
+    def mouse_up(self, button: int):
         self.client.mouseUp(button)
 
     def key_down(self, key):

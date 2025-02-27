@@ -146,21 +146,16 @@ IMPORTANT:
 - Include only clearly visible/available options
 - Describe the interface from a user's perspective"""
 
-    def __init__(self, 
-                 image: Optional[Image.Image] = None, 
-                 model: Optional[Model] = None, 
-                 provider: Optional[VisionLLMBase] = None, 
-                 provider_coords: Optional[VisionLLMBase] = None):
+    def __init__(self, image: Optional[Image.Image] = None, debug_mode: bool = False):
         
-        if not image and not model and not provider and not provider_coords:
-            self.debug_mode = True
-        else:
-            self.debug_mode = False
-
+        self.debug_mode = debug_mode
         self.image= image
-        self.provider = provider
-        self.provider_coords = provider_coords
-        self.model = model
+
+        self.model = Model.create_from_config("planning_model")
+        self.provider = VisionLLMBase.create_from_config("googlevision")
+        self.provider_coords = VisionLLMBase.create_from_config("qwenvision")
+        self.provider_labels = Model.create_from_config("label_model")
+        
         self.text_analysis: Optional[TextScreenAnalysis] = None
         self._is_text_analyzed = False
         self.ocr_bbox = None
@@ -202,6 +197,14 @@ IMPORTANT:
 
         return self
 
+
+    def _get_annotated_image(self, _elements, logits, phrases):
+        image_source = np.asarray(self.image)
+        annotated_frame, cropped_images = annotate_and_crop(image_source=image_source, boxes=torch.tensor(_elements), logits=logits, phrases=phrases)
+        pil_img = Image.fromarray(annotated_frame)
+        return pil_img, cropped_images[phrases[0]]
+    
+
     def _prepprocess_image(self):
 
         if self._is_yolo_ocr_processed:
@@ -232,8 +235,18 @@ IMPORTANT:
         # sort the filtered_boxes so that the one with 'content': None is at the end, and get the index of the first 'content': None
         self.filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
         # print("filtered_boxes_elem", self.filtered_boxes_elem)
-
-        self._is_yolo_ocr_processed = True
+        filtered_boxes = torch.tensor([box['bbox'] for box in self.filtered_boxes_elem])
+        filtered_boxes = filtered_boxes / torch.Tensor([w, h, w, h]).to(filtered_boxes.device)
+        for i, b in enumerate(self.filtered_boxes_elem):
+            if b["source"] == "box_yolo_content_yolo": 
+                _l = []
+                _l.append(filtered_boxes[i].tolist())
+                _i, _i2 = self._get_annotated_image(_l, logits, [f"{i}"])
+                #_i2 = get_cropped_image(filtered_boxes[i], image_source)
+                result = self.provider_labels.generate_content(f"you are provided with 2 images. label the element with number '0' in a single sentence. there is an additional cropped image just containing the content of the bounding box.\n\n Important: Output only the element type, the label if avalable, and its function. \n Example: folder icon, named 'Works', representing the current directory", [_i, _i2]) 
+                print(i, result)
+                self.filtered_boxes_elem[i]["content"] = result
+                self._is_yolo_ocr_processed = True
 
         # print(self.filtered_boxes_elem)
         # get the index of the first 'content': None
@@ -413,9 +426,7 @@ IMPORTANT:
            
             assert self.filtered_boxes_elem is not None, "No filtered boxes found"
             # Filter box detection results
-            box_elements = [elem for elem in self.filtered_boxes_elem
-                        if elem['source'] in ['box_ocr_content_ocr', 'box_yolo_content_ocr']]
-            
+            box_elements = [elem for elem in self.filtered_boxes_elem]
             # Process each box element
             for box in box_elements:
                 matched = False
@@ -457,7 +468,7 @@ IMPORTANT:
                 # Add new element if no match found
                 if not matched:
                     element_type = "button" if box['interactivity'] else "text"
-                    context = "Boot screen interface"
+                    context = ""
                     
                     new_element = {
                         "element_id": f"{box['content'].lower().replace(' ', '_') if box['content'] else 'icon'}_{len(self.ui_elements)}",

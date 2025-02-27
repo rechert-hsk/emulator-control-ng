@@ -15,8 +15,8 @@ import json
 class StepPlanner:
     """Plans and generates detailed execution steps based on the execution plan in TaskContext"""
     
-    def __init__(self, model):
-        self.model = model
+    def __init__(self):
+        self.model = Model.create_from_config("planning_model")
         self.system_prompt = """You are an expert UI process automation planner.
             Your role is to:
             1. Generate precise interaction instructions for the current step
@@ -102,6 +102,7 @@ class StepPlanner:
         - Double click: "click" with click_type="double" 
         - Click and hold: "click" with hold=true
         - Click and drag: "drag" with from_target and to_target
+        - No operation: "noop" for waiting without action
         """
 
         return f"""
@@ -114,7 +115,7 @@ class StepPlanner:
         - Required elements must be present: {', '.join(current_plan_step.precondition.key_elements)}
         - Expected outcome: {current_plan_step.expected_outcome.description if current_plan_step.expected_outcome else 'Unknown'}
         - Must use only elements that are currently visible
-        - Must be exactly ONE specific interaction (click, drag, type, press key, or select)
+        - Must be exactly ONE specific interaction (click, drag, type, press key, select, or noop)
 
         CONTEXT:
         Interface: {vision_analysis.environment.interface_type.name if vision_analysis.environment else 'Unknown'}
@@ -138,10 +139,11 @@ class StepPlanner:
         1. Based on your analysis of the current screenshot state, identify the most appropriate action
         2. If previous attempts failed, choose a different approach based on what's currently visible
         3. Generate a single, specific interaction that moves towards the goal
-        4. Format response as JSON with this exact schema:
+        4. Use "noop" for situations where waiting is required (like during installation progress)
+        5. Format response as JSON with this exact schema:
         {{
             "description": "Clear explanation of what will be done and why based on current UI state",
-            "action": "<click|drag|type|press_key|select>",
+            "action": "<click|drag|type|press_key|select|noop>",
             "target": "id_of_target_element",
             "context": {{
                 "button": "left|right|middle",
@@ -154,7 +156,9 @@ class StepPlanner:
                 "append_enter": true/false,
                 "max_length": number,
                 "special_characters": ["list", "of", "special", "chars"],
-                "additional_notes": "other relevant details"
+                "additional_notes": "other relevant details",
+                "wait_condition": "condition to wait for (for noop action)",
+                "wait_timeout": number
             }}
         }}
         """
@@ -210,7 +214,7 @@ class StepPlanner:
 
     def _validate_step_data(self, step_data: dict) -> bool:
         """Validate step data has required fields"""
-        required_fields = ['description', 'action', 'target', 'context']
+        required_fields = ['description', 'action', 'context']
         
         if not isinstance(step_data, dict):
             raise ValueError(f"Step data must be a dictionary, got {type(step_data)}")
@@ -219,9 +223,13 @@ class StepPlanner:
         if missing_fields:
             raise ValueError(f"Step missing required fields: {missing_fields}")
             
-        valid_actions = ['click', 'type', 'press_key', 'select']
+        valid_actions = ['click', 'type', 'press_key', 'select', 'noop', 'drag']
         if step_data['action'] not in valid_actions:
             raise ValueError(f"Invalid action: {step_data['action']}")
+            
+        # Target is required for all actions except noop
+        if step_data['action'] != 'noop' and 'target' not in step_data:
+            raise ValueError("Target field is required for non-noop actions")
             
         return True
 
@@ -245,7 +253,17 @@ class StepPlanner:
             if context_data is None:
                 raise ValueError("Missing required 'context' field in step data")
 
-            if step_data.get('action') == 'click':
+            if step_data.get('action') == 'noop':
+                # Set defaults for noop action
+                context_data.setdefault('wait_condition', 'none')
+                context_data.setdefault('wait_timeout', 60)  # Default 60 second timeout
+                return {
+                    'wait_condition': context_data.get('wait_condition'),
+                    'wait_timeout': context_data.get('wait_timeout', 60),
+                    'additional_notes': context_data.get('additional_notes')
+                }
+            
+            elif step_data.get('action') == 'click':
                 # Set defaults for click action
                 context_data.setdefault('button', 'left')
                 context_data.setdefault('click_type', 'single') 
@@ -272,17 +290,15 @@ class StepPlanner:
                 context_data.setdefault('button', 'left')
                     
             elif step_data.get('action') == 'type':
-                required_fields = ['input_text', 'input_format', 'append_enter', 'max_length', 'special_characters']
-                missing_fields = [f for f in required_fields if f not in context_data]
-                
-                if missing_fields:
-                    raise ValueError(f"Typing context missing required fields: {missing_fields}")
+                # Only input_text is required for type action
+                if 'input_text' not in context_data:
+                    raise ValueError("Typing context missing required field: input_text")
                     
                 return {
                     'input_text': context_data.get('input_text'),
-                    'input_format': context_data.get('input_format'),
+                    'input_format': context_data.get('input_format', None),
                     'append_enter': context_data.get('append_enter', False),
-                    'max_length': context_data.get('max_length'),
+                    'max_length': context_data.get('max_length', None),
                     'special_characters': context_data.get('special_characters', []),
                     'additional_notes': context_data.get('additional_notes')
                 }
@@ -291,7 +307,7 @@ class StepPlanner:
             
         except Exception as e:
             print(f"Failed to process step context: {str(e)}")
-            return {}
+            raise ValueError(f"Failed to process step context: {str(e)}")
 
     def _get_step_coordinates(self, step_data: dict, vision_analysis: ScreenAnalysis) -> Optional[tuple]:
         """Get coordinates for a step's target element if needed"""

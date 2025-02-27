@@ -20,9 +20,6 @@ class VisionController:
     """Main controller class for managing vision-based UI analysis"""
     
     def __init__(self, vnc_controller:  VNCController, 
-                model: Model,
-                vision_provider_elements: VisionLLMBase, 
-                vision_provider_coords: Optional[VisionLLMBase] = None,
                 fps: float = 1.0, 
                 stability_threshold: float = 0.98, 
                 change_threshold: float = 0.98):
@@ -34,18 +31,14 @@ class VisionController:
         self.stable_frame_count = 0
         self.last_frame = None
         self.last_resolution: Optional[Tuple[int, int]] = None
-        self.model = model
+       
         self.change_threshold = change_threshold
         self.last_provided_frame = None
         self.new_stable_frame_available = False
         self.stop_processing = False
 
-        self.provider = vision_provider_elements
-        if vision_provider_coords is None:
-            self.provider_coords = vision_provider_elements
-        else:
-            self.provider_coords = vision_provider_coords
 
+        
     
     def calculate_frame_similarity(self, frame1: Image.Image, frame2: Image.Image) -> float:
         """Calculate similarity between two frames using SSIM"""
@@ -86,7 +79,7 @@ class VisionController:
         while time.time() - start_time < timeout:
             if self.new_stable_frame_available:
                 self.new_stable_frame_available = False        
-                return ScreenAnalysis(self.current_stable_frame, self.model, self.provider, self.provider_coords)
+                return ScreenAnalysis(self.current_stable_frame)
             time.sleep(0.2)
             
         return None

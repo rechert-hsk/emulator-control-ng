@@ -58,23 +58,33 @@ class OpenRouter(Model):
                         system_prompt: Optional[str] = None,
                         schema: Optional[str] = None) -> str:
 
-        if isinstance(images, list):
-            images = images[0]
+        # Convert single image to list for consistent handling
+        if not isinstance(images, list):
+            images = [images]
 
         try:
-            encoded_image = self._encode_image(images)
+            # Prepare content array starting with images
+            content = []
             
+            # Add each image to the content array
+            for img in images:
+                encoded_image = self._encode_image(img)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded_image}"}
+                })
+            
+            # Add the text prompt after all images
+            content.append({"type": "text", "text": prompt})
+            
+            # Prepare messages array
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
             messages.append({
                 "role": "user",
-                "content": [
-                    {"type": "image_url",
-                     "image_url": {"url": f"data:image/png;base64,{encoded_image}"}},
-                    {"type": "text", "text": prompt}
-                ],
+                "content": content,
             })
 
             response = self.client.chat.completions.create(
@@ -99,4 +109,3 @@ class OpenRouter(Model):
 
 
 
-        

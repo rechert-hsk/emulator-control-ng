@@ -135,3 +135,58 @@ class VisionLLMBase(ABC):
     def get_confidence(self, element: UIElement) -> float:
         """Get confidence for a specific element"""
         pass
+        
+    @staticmethod
+    def create_from_config(provider: str) -> 'VisionLLMBase':
+        """
+        Factory method to create a vision model instance based on configuration
+        
+        Args:
+            provider: Provider name to select from the vision_model list
+            
+        Returns:
+            An instance of a VisionLLMBase implementation
+        """
+        # Get the absolute path to the config file
+        config_path = os.path.join(os.getcwd(), "config.json")
+        
+        # Load the configuration
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+        except json.JSONDecodeError:
+            raise ValueError(f"Configuration file at {config_path} is not valid JSON")
+        
+        if "vision_model" not in config:
+            raise ValueError("No vision_model configuration found in config.json")
+        
+        vision_models = config["vision_model"]
+        if not isinstance(vision_models, list):
+            raise ValueError("vision_model in config.json should be a list")
+        
+        # Find the vision model config with the matching provider
+        selected_config = None
+        for model_config in vision_models:
+            if model_config.get("provider", "").lower() == provider.lower():
+                selected_config = model_config
+                break
+        
+        if not selected_config:
+            raise ValueError(f"No vision model with provider '{provider}' found in configuration")
+        
+        api_key = selected_config.get("apiKey")
+        if not api_key:
+            raise ValueError(f"No API key provided for vision model with provider '{provider}'")
+        
+        if provider.lower() == "qwenvision":
+            # Import here to avoid circular imports
+            from vision.vision_qwen import QwenVision
+            return QwenVision(apikey=api_key)
+        elif provider.lower() == "googlevision":
+            # Import here to avoid circular imports
+            from vision.vision_google import GoogleVision
+            return GoogleVision(apikey=api_key)
+        else:
+            raise ValueError(f"Unsupported vision provider: {provider}. Currently only 'QwenVision' is supported.")

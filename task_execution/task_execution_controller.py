@@ -8,13 +8,13 @@ from task_execution.event_manager import EventManager
 from task_execution.task_planner import TaskPlanner
 from task_execution.data_structures import TaskContext, StepPlan
 from task_execution.step_planner import StepPlanner
-from task_execution.step_evaluator import StepEvaluator
 from models.openrouter import OpenRouter
 from vision.vision_analysis import ScreenAnalysis
 import json
 import time
 from threading import Thread
 from task_execution.data_structures import PlanVersion
+from models.api import Model
 
 class TaskExecutionController:
     """
@@ -23,20 +23,19 @@ class TaskExecutionController:
     """
     
     def __init__(self, 
-                 model: OpenRouter,
                  vision_controller: VisionController,
                  vnc_controller: VNCController,
                  emulator_controller: EmulatorController,
                  debug_mode: bool = False):
         
         
+        self.planning_model = Model.create_from_config("planning_model")
         self.vision = vision_controller
         self.vnc = vnc_controller
         self.emulator = emulator_controller
-        self.event_manager = EventManager(model, vnc_controller)
-        self.task_planner = TaskPlanner(model)
-        self.step_panner = StepPlanner(model)
-        self.step_evaluator = StepEvaluator(model)
+        self.event_manager = EventManager(vnc_controller)
+        self.task_planner = TaskPlanner()
+        self.step_panner = StepPlanner()
         
         self.max_retries = 3
         self.retry_delay = 2.0
@@ -336,29 +335,12 @@ if __name__ == "__main__":
     # emulator_controller.restore_snapshot("test")
     # time.sleep(100)
 
-    with open('config.json') as config_file:
-        config = json.load(config_file)
-
-    openrouter_api_key = config.get("openrouter_api_key")
-    openrouter_model = OpenRouter(openrouter_api_key, "google/gemini-2.0-flash-001")
-    # openrouter_model = OpenRouter(openrouter_api_key, "openai/gpt-4o-mini")
-
-    api_key = config.get("google_api_key")
-    openrouter_api_key = config.get("openrouter_api_key")
-    alibaba_api_key = config.get("alibaba_api_key")
-
-    vision_elements = GoogleVision(api_key)
-    vision_coords = QwenVision(alibaba_api_key)
+ 
     vnc_controller = VNCController()
 
-    vision_controller = VisionController(
-        vnc_controller=vnc_controller,
-        model=openrouter_model,
-        vision_provider_elements=vision_elements,
-        vision_provider_coords=vision_coords)
-   
+    vision_controller = VisionController(vnc_controller=vnc_controller)
+     
     task_execution_controller = TaskExecutionController(
-        model=openrouter_model,
         vision_controller=vision_controller, 
         vnc_controller=vnc_controller, 
         emulator_controller=emulator_controller,

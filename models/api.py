@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from PIL import Image
 from typing import Optional, Union, List, Dict, Any
 import json
+import os
 
 import time
 import logging
@@ -70,3 +71,43 @@ class Model(ABC):
                         system_prompt: Optional[str] = None) -> str:
         """Generate content based on prompt and images"""
         pass
+    
+    @staticmethod
+    def create_from_config(model_type: str) -> 'Model':
+        """
+        Factory method to create a model instance based on configuration
+        
+        Args:
+            model_type: Type of model to create ('planning_model' or 'label_model')
+            
+        Returns:
+            An instance of a Model implementation
+        """
+        # Get the absolute path to the config file
+        config_path = os.path.join(os.getcwd(), "config.json")
+        
+        # Load the configuration
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+        except json.JSONDecodeError:
+            raise ValueError(f"Configuration file at {config_path} is not valid JSON")
+        
+        if model_type not in config:
+            raise ValueError(f"Model type '{model_type}' not found in configuration")
+        
+        model_config = config[model_type]
+        provider = model_config.get("provider", "").lower()
+        
+        # Import the existing OpenRouter implementation
+        from models.openrouter import OpenRouter
+        
+        if provider == "openrouter":
+            return OpenRouter(
+                api_key=model_config["apiKey"],
+                model_name=model_config["model"]
+            )
+        else:
+            raise ValueError(f"Unsupported provider: {provider}. Currently only 'openrouter' is supported.")

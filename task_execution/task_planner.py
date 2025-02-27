@@ -10,8 +10,8 @@ import json
 class TaskPlanner:
     """Creates high-level execution plans based on task goals and UI state"""
 
-    def __init__(self, planner_model):
-        self.planner_model = planner_model
+    def __init__(self):
+        self.planner_model = Model.create_from_config("planning_model")
         
         self.system_prompt = """You are an expert system automation planner.
             Create plans that describe tasks in natural language steps.

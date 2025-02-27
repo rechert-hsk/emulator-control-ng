@@ -15,6 +15,7 @@ class VNCEvent:
     x: Optional[int] = None
     y: Optional[int] = None
     key: Optional[str] = None
+    text: Optional[str] = None
     duration: Optional[float] = None
     button: Optional[str] = None  # left, middle, right
 
@@ -25,12 +26,11 @@ class EventManager:
     primitive VNC events.
     """
     
-    def __init__(self, model, vnc_controller: VNCController):
+    def __init__(self, vnc_controller: VNCController):
         self.vnc = vnc_controller
         self.default_delay = 0.1
         self.max_retries = 3
-        
-        self.translator_model = model
+        self.translator_model = Model.create_from_config("planning_model")
 
         self.system_prompt="""You are an expert in translating UI interactions 
             into primitive VNC events. Break down complex UI interactions into
@@ -114,6 +114,13 @@ class EventManager:
                 self.vnc.key_down(event.key)
             elif event.type == "keyup":
                 self.vnc.key_up(event.key)
+            elif event.type == "text":
+                for char in event.text:
+                    self.vnc.key_down(char)
+                    self.vnc.key_up(char)
+                    time.sleep(0.05)
+            elif event.type == "noop":
+                time.sleep(0.1)
             elif event.type == "delay":
                 if event.duration and event.duration > 0:
                     time_to_sleep = min(event.duration/1000, 60)
@@ -157,6 +164,8 @@ REQUIREMENTS:
 - keydown: Requires key value
 - keyup: Requires key value
 - delay: Requires duration in ms
+- text: Requires text value (for entering strings of text)
+- noop: Performs no operation (can be used as a placeholder)
 
 2. For click interactions:
 - Single click: mousedown + mouseup
@@ -189,12 +198,15 @@ REQUIREMENTS:
 - Add delays between actions (min 50ms)
 - Handle multi-step sequences in correct order
 - For double clicks ensure proper timing (100ms between clicks)
+- Use the "text" event for entering multi-character strings
+- Use "noop" when a placeholder operation is needed
 
 5. IMPORTANT
 - Carefully evaluate all information provided as context
 - Follow exact click patterns based on click_type
 - Respect button selection (left/middle/right)
 - Handle click and hold when specified
+- For text input, prefer the "text" event over individual keydown/keyup events
 
 RESPONSE FORMAT:
 Return a JSON array of events where each event has:
@@ -204,7 +216,8 @@ Return a JSON array of events where each event has:
 "y": number, // For mouse events 
 "button": number, // For mouse events (1=left, 2=middle, 3=right)
 "key": string, // For keyboard events
-"duration": number // For delays (in ms)
+"duration": number, // For delays (in ms)
+"text": string // For text events
 }}
 
 Example for double right click:
@@ -216,9 +229,16 @@ Example for double right click:
 {{"type": "mousedown", "button": 3}},
 {{"type": "mouseup", "button": 3}}
 ]
+
+Example for typing text:
+[
+{{"type": "mousemove", "x": 100, "y": 200}},
+{{"type": "mousedown", "button": 1}},
+{{"type": "mouseup", "button": 1}},
+{{"type": "text", "text": "Hello world!"}}
+]
 """
 
-        
         response = self.translator_model.complete(prompt, self.system_prompt)
         events_data = Model.parse_json(response)
         
@@ -247,7 +267,9 @@ Example for double right click:
             "mouseup": ["button"], 
             "keydown": ["key"],
             "keyup": ["key"],
-            "delay": ["duration"]
+            "delay": ["duration"],
+            "text": ["text"],
+            "noop": []
         }
 
         # Convert string button names to numbers
@@ -276,5 +298,4 @@ Example for double right click:
                 return None
 
         return VNCEvent(**event_data)
-
     
